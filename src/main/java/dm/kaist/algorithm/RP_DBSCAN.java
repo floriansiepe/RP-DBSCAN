@@ -210,37 +210,57 @@ public class RP_DBSCAN implements Serializable {
      * Write Meta Result
      */
     public void writeMetaResult(long totalElapsedTime) {
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(Conf.metaOutputPath))) {
+            // Prepare headers and values
+            String[] headers = {
+                    "Input", "Output", "NumPartitions", "Rho", "Dim", "Epsilon", "MinPts", "MetaBlockWindow"
+            };
+            String[] values = {
+                    Conf.inputPath,
+                    Conf.metaOutputPath,
+                    String.valueOf(Conf.numOfPartitions),
+                    String.valueOf(Conf.rho),
+                    String.valueOf(Conf.dim),
+                    String.valueOf(Conf.epsilon),
+                    String.valueOf(Conf.minPts),
+                    String.valueOf(Conf.metaBlockWindow)
+            };
 
-        try {
-            FileWriter fw = new FileWriter(Conf.metaOutputPath);
-            BufferedWriter bw = new BufferedWriter(fw);
+            // Add optional PairOutputPath
+            StringBuilder headerLine = new StringBuilder();
+            StringBuilder valueLine = new StringBuilder();
+            for (int i = 0; i < headers.length; i++) {
+                headerLine.append(headers[i]).append(",");
+                valueLine.append(values[i]).append(",");
+            }
+            if (Conf.pairOutputPath != null) {
+                headerLine.append("PairOutputPath,");
+                valueLine.append(Conf.pairOutputPath).append(",");
+            }
 
-            bw.write("-i : " + Conf.inputPath + "\n");
-            bw.write("-o : " + Conf.metaOutputPath + "\n");
-            bw.write("-np : " + Conf.numOfPartitions + "\n");
-            bw.write("-rho : " + Conf.rho + "\n");
-            bw.write("-dim : " + Conf.dim + "\n");
-            bw.write("-eps : " + Conf.epsilon + "\n");
-            bw.write("-minPts : " + Conf.minPts + "\n");
-            bw.write("-bs : " + Conf.metaBlockWindow + "\n");
-            if (Conf.pairOutputPath != null)
-                bw.write("-l : " + Conf.pairOutputPath + "\n");
+            // Add meta results
+            headerLine.append("NumCells,NumSubCells,NumSubDictionaries,NumCorePoints,NumClusters,TotalElapsedTime(s),");
+            valueLine.append(numOfCells).append(",")
+                    .append(numOfSubCells).append(",")
+                    .append(numOfSubDictionaries).append(",")
+                    .append(numOfCorePoints).append(",")
+                    .append(numOfClusters).append(",")
+                    .append(totalElapsedTime / 1000.0).append(",");
 
-            bw.write("\nThe number of cells : " + numOfCells + "\n");
-            bw.write("The number of sub-cells : " + numOfSubCells + "\n");
-            bw.write("The number of sub-dictionaries : " + numOfSubDictionaries + "\n");
-            bw.write("The number of core points : " + numOfCorePoints + "\n\n");
-            bw.write("The number of clusters : " + numOfClusters + "\n");
-            int clusterId = 1;
-            for (Tuple2<Integer, Long> cluster : numOfPtsInCluster)
-                bw.write("Cluster " + (clusterId++) + " : " + cluster._2 + "\n");
+            // Add cluster info
+            for (int i = 0; i < numOfPtsInCluster.size(); i++) {
+                headerLine.append("Cluster").append(i + 1).append(",");
+                valueLine.append(numOfPtsInCluster.get(i)._2).append(",");
+            }
 
-            bw.write("\nTotal elapsed time : " + totalElapsedTime / 1000.0 + "s");
-            bw.close();
-            fw.close();
+            // Remove trailing commas
+            if (headerLine.length() > 0) headerLine.setLength(headerLine.length() - 1);
+            if (valueLine.length() > 0) valueLine.setLength(valueLine.length() - 1);
+
+            // Write to file
+            bw.write(headerLine.toString() + "\n");
+            bw.write(valueLine.toString() + "\n");
         } catch (IOException e) {
-            // TODO Auto-generated catch block
             e.printStackTrace();
-        }
-    }
+        }    }
 }
