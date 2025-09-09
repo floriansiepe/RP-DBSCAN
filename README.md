@@ -84,7 +84,7 @@ Following the recent trends in big data processing, several parallel DBSCAN algo
 
 <img src="Example/Image/chameleon_input.png" width="250"> 
 
-- Spark parameter tunning in [MainDriver.java](RP_DBSCAN/src/dm/kaist/main/MainDriver.java)
+- Spark parameter tunning in [MainDriver.java](src/main/java/kaist/main/MainDriver.java)
 
  ```
  // You should set proper spark configurations considering your distributed processing environment.
@@ -104,12 +104,12 @@ Following the recent trends in big data processing, several parallel DBSCAN algo
  hdfs dfs -put chameleon.ds /chameleon.ds
  
  // Run RP-DBSCAN on chameleon data set (without writing labeled points).
- spark-submit --class dm.kaist.main.MainDriver RP_DBSCAN.jar -i addressOfHDFS/chameleon.ds -o output.txt -np 20 -rho 0.01 -dim 2 -eps 0.02 -minPts 180
+ spark-submit --class dm.dm.kaist.main.MainDriver RP_DBSCAN.jar -i addressOfHDFS/chameleon.ds -o output.txt -np 20 -rho 0.01 -dim 2 -eps 0.02 -minPts 180
  
  // Run RP-DBSCAN on chameleon data set (with writing labeled points).
  // labeled points are written in HDFS
  // When data size is extremly large, this writing can take a long time.
- spark-submit --class dm.kaist.main.MainDriver RP_DBSCAN.jar -i addressOfHDFS/chameleon.ds -o output.txt -np 20 -rho 0.01 -dim 2 -eps 0.02 -minPts 180 -l labeledOutput
+ spark-submit --class dm.dm.kaist.main.MainDriver RP_DBSCAN.jar -i addressOfHDFS/chameleon.ds -o output.txt -np 20 -rho 0.01 -dim 2 -eps 0.02 -minPts 180 -l labeledOutput
  
  // Get labeledOutput directory from HDFS into current directory
  hdfs dfs -get labeledOutput .
