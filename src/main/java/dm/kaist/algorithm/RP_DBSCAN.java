@@ -93,7 +93,13 @@ public class RP_DBSCAN implements Serializable {
                     .mapToPair(new Methods.PseudoRandomPartition2(Conf.metaBlockWindow)).persist(StorageLevel.MEMORY_AND_DISK_SER());
         } else
             dataMap = lines.zipWithIndex()
-                    .mapToPair(tuple -> new Methods.PointToCell(Conf.dim, Conf.epsilon, tuple._2).call(tuple._1))
+                    .mapToPair(tuple -> {
+                        var m = new Methods.PointToCell(Conf.dim, Conf.epsilon, tuple._2).call(tuple._1);
+                        if (m._2.coords.length != Conf.dim) {
+                            throw new IllegalStateException("Mapped cell has invalid dimension: " + m._2.coords.length + " for expected dim=" + Conf.dim);
+                        }
+                        return m;
+                    })
                     .groupByKey()
                     .mapToPair(new Methods.PseudoRandomPartition(Conf.dim, Conf.epsilon, Conf.rho, Conf.metaBlockWindow, Conf.pairOutputPath))
                     .persist(StorageLevel.MEMORY_AND_DISK_SER());
