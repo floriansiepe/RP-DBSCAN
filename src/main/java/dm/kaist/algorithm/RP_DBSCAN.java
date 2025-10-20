@@ -71,6 +71,12 @@ public class RP_DBSCAN implements Serializable {
         //Read input data set from HDFS
         JavaRDD<String> lines = sc.textFile(Conf.inputPath, Conf.numOfPartitions);
         JavaPairRDD<List<Integer>, ApproximatedCell> dataMap = null;
+        var t = lines.zipWithIndex()
+                .mapToPair(tuple -> new Methods.PointToCell(Conf.dim, Conf.epsilon, tuple._2).call(tuple._1));
+        System.out.println("# of total points: " + t.count());
+        var first = t.first();
+        System.out.println("First point mapped to cell: " + first._1.toString());
+
 
         //Data partitioning
         if (Conf.boost) {
