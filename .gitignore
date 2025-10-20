@@ -1,7 +1,7 @@
-CORE_INFO
-DICTIONARY
-EDGES
-GLOBAL_CELL_GRAPH
+/CORE_INFO
+/DICTIONARY
+/EDGES
+/GLOBAL_CELL_GRAPH
 *.csv
 /target/
 !.mvn/wrapper/maven-wrapper.jar
