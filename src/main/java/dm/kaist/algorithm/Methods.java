@@ -264,21 +264,30 @@ public class Methods implements Serializable {
             //Assign each point to a proper sub-cell
             //approximated point means the lvH sub-cell
             HashMap<List<Integer>, ApproximatedPoint> map = new HashMap<List<Integer>, ApproximatedPoint>();
-
+            var success = 0;
+            var fail = 0;
             for (Point pt : pts._2) {
-                List<Integer> lvH = pt.getLevel_1_Coords(levelpSideLen, dim);
-                if (!map.containsKey(lvH)) {
-                    ApproximatedPoint apprPt = new ApproximatedPoint(pt.id, pt.coords);
-                    map.put(lvH, apprPt);
+                try {
+                    List<Integer> lvH = pt.getLevel_1_Coords(levelpSideLen, dim);
+                    if (!map.containsKey(lvH)) {
+                        ApproximatedPoint apprPt = new ApproximatedPoint(pt.id, pt.coords);
+                        map.put(lvH, apprPt);
+
+                        if (pairOutputPath != null)
+                            apprPt.ptsIds = new ArrayList<Long>();
+                    }
+                    map.get(lvH).count++;
 
                     if (pairOutputPath != null)
-                        apprPt.ptsIds = new ArrayList<Long>();
+                        map.get(lvH).ptsIds.add(pt.id);
+                    success++;
+                } catch (Exception e) {
+                    fail++;
+                    System.out.println("Error Point Id : " + pt.id);
                 }
-                map.get(lvH).count++;
-
-                if (pairOutputPath != null)
-                    map.get(lvH).ptsIds.add(pt.id);
             }
+
+            System.out.println("Success Count : " + success + ", Fail Count : " + fail);
 
             ApproximatedCell cell = new ApproximatedCell(pts._1);
             for (Entry<List<Integer>, ApproximatedPoint> pt : map.entrySet())
