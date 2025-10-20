@@ -4,7 +4,6 @@ import dm.kaist.dictionary.ApproximatedCell;
 import dm.kaist.graph.Edge;
 import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.FileIO;
-import dm.kaist.io.Point;
 import dm.kaist.io.SerializableConfiguration;
 import dm.kaist.partition.Partition;
 import org.apache.commons.lang3.ObjectUtils.Null;
@@ -74,6 +73,7 @@ public class RP_DBSCAN implements Serializable {
         JavaPairRDD<List<Integer>, ApproximatedCell> dataMap = null;
         var t = lines.zipWithIndex()
                 .mapToPair(tuple -> new Methods.PointToCell(Conf.dim, Conf.epsilon, tuple._2).call(tuple._1));
+        t.take(5).forEach(x -> System.out.println("Point mapped to cell: " + x._2.toString()));
         System.out.println("# of total points: " + t.count());
         var first = t.first();
         System.out.println("First point mapped to cell: " + first._1.toString());
@@ -275,5 +275,6 @@ public class RP_DBSCAN implements Serializable {
             bw.write(valueLine.toString() + "\n");
         } catch (IOException e) {
             e.printStackTrace();
-        }    }
+        }
+    }
 }
