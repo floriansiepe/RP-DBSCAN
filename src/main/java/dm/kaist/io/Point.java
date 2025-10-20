@@ -20,6 +20,10 @@ public class Point implements Serializable {
 
     public Point(long id, String line, int dim) {
         String[] toks = line.split(Conf.delimeter);
+        // Defensive check: ensure we have enough tokens for the declared dimension.
+        if (toks == null || toks.length < dim) {
+            throw new IllegalArgumentException("Invalid input line for Point construction. Expected " + dim + " values but got " + (toks == null ? 0 : toks.length) + ". Line: '" + line + "'");
+        }
         this.id = id;
         float[] coords = new float[dim];
         for (int i = 0; i < dim; i++)
@@ -35,6 +39,9 @@ public class Point implements Serializable {
     }
 
     public List<Integer> getLevel_1_Coords(float level_1_SideLen, int dim) {
+        if (this.coords == null || this.coords.length < dim) {
+            throw new IllegalStateException("Point (id=" + this.id + ") has invalid coords length=" + (this.coords == null ? 0 : this.coords.length) + " for expected dim=" + dim);
+        }
         List<Integer> gridCoords = new ArrayList<Integer>();
         for (int i = 0; i < dim; i++)
             gridCoords.add((int) Math.floor(this.coords[i] / level_1_SideLen));
@@ -43,6 +50,9 @@ public class Point implements Serializable {
 
 
     public List<Character> getLevel_p_Coords(List<Integer> gridCoords, float level_1_SideLen, float level_p_SideLen, int dim) {
+        if (this.coords == null || this.coords.length < dim) {
+            throw new IllegalStateException("Point (id=" + this.id + ") has invalid coords length=" + (this.coords == null ? 0 : this.coords.length) + " for expected dim=" + dim);
+        }
         float gap = 0;
         char temp = 0;
         List<Character> key = new ArrayList<Character>();
