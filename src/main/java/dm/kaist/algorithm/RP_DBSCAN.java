@@ -4,6 +4,7 @@ import dm.kaist.dictionary.ApproximatedCell;
 import dm.kaist.graph.Edge;
 import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.FileIO;
+import dm.kaist.io.Point;
 import dm.kaist.io.SerializableConfiguration;
 import dm.kaist.partition.Partition;
 import org.apache.commons.lang3.ObjectUtils.Null;
@@ -76,6 +77,12 @@ public class RP_DBSCAN implements Serializable {
         System.out.println("# of total points: " + t.count());
         var first = t.first();
         System.out.println("First point mapped to cell: " + first._1.toString());
+        // Print the first 5 lines
+        List<String> first5 = lines.take(5);
+        System.out.println("First 5 points mapped to cells:");
+        for (String tuple : first5) {
+            System.out.println("Point mapped to cell: " + tuple);
+        }
 
 
         //Data partitioning
