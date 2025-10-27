@@ -91,8 +91,6 @@ public class RP_DBSCAN implements Serializable {
                     .groupByKey()
                     .mapToPair(tuple -> new Methods.PseudoRandomPartition(cfg.dim, cfg.epsilon, cfg.rho, cfg.metaBlockWindow, cfg.pairOutputPath, cfg.limitDimForVirtualCombining).call(tuple));
         numOfCells = dataMap.count();
-        System.out.println("# of Cells : " + numOfCells);
-        System.out.println(dataMap.collect());
 
         /**
          * Phase I-2. Cell_Dictionary_Building & Broadcasting
@@ -100,7 +98,6 @@ public class RP_DBSCAN implements Serializable {
         //Dictionary Defragmentation
         JavaPairRDD<List<Integer>, Long> ptsCountforEachMetaBlock = dataMap.mapToPair(k -> new Methods.MetaBlockMergeWithApproximation(cfg.dim).call(k)).reduceByKey((x, y) -> new Methods.AggregateCount().call(x, y));
         List<Tuple2<List<Integer>, Long>> numOfPtsInCell = ptsCountforEachMetaBlock.collect();
-        System.out.println("# of Blocks for virtually combining : " + numOfPtsInCell.size());
         for (Tuple2<List<Integer>, Long> entry : numOfPtsInCell) {
             if (entry._1.size() != cfg.dim) {
                 throw new RuntimeException("Wrong number of blocks for virtually combining");

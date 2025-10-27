@@ -323,7 +323,6 @@ public class Methods implements Serializable {
                 metaBlockId.add(i / metaBlockWindow);
                 dimOfCoord++;
             }
-            System.out.println("Test1 " + cell.toString());
             if (cell.cellCoords.size() != dim) {
                 throw new IllegalStateException("PseudoRandomPartition: cell has invalid coords size=" + cell.cellCoords.size() + " for expected dim=" + dim);
             }
@@ -585,7 +584,6 @@ public class Methods implements Serializable {
 
             int id = 1;
             for (Dictionary meta : metaPaths) {
-                System.out.println("Meta Id : " + (id++));
                 findCoreWithSpecificMeta(meta, grids);
             }
 
@@ -741,7 +739,6 @@ public class Methods implements Serializable {
 
             int ids = 1;
             for (Dictionary meta : metaPaths) {
-                System.out.println("DDR Meta ID : " + (ids++));
                 findDDRWithSpecificMeta(meta, edges, grids);
             }
 
