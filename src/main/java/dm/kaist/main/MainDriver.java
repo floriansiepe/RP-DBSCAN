@@ -42,7 +42,7 @@ public class MainDriver {
         SparkConf sparkConf = new SparkConf().setAppName("RP_DBSCAN");
         sparkConf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
         sparkConf.set("spark.kryoserializer.buffer.mb", "256");
-        sparkConf.registerKryoClasses(new Class<?>[]{ArrayList.class, Edge.class, Point.class, ObjectUtils.Null.class, Cell.class, ApproximatedCell.class, ApproximatedPoint.class, LabeledCell.class, HashMap.class, Tuple2.class, Tuple2$.class});
+        sparkConf.registerKryoClasses(new Class<?>[]{ArrayList.class, Edge.class, Point.class, ObjectUtils.Null.class, Cell.class, ApproximatedCell.class, ApproximatedPoint.class, LabeledCell.class, HashMap.class});
         return sparkConf;
     }
     /**
@@ -51,9 +51,6 @@ public class MainDriver {
      * To find clusters using RP-DBSCAN
      **/
     public static void main(String[] args) {
-        System.out.println("ARGS");
-        for (String arg : args)
-            System.out.println(arg);
         //Parameter Load
         var conf = new Conf();
         conf.setInputParameters(args);

@@ -8,6 +8,8 @@ import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.FileIO;
 import dm.kaist.io.SerializableConfiguration;
 import dm.kaist.partition.Partition;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -55,11 +57,6 @@ public class RP_DBSCAN implements Serializable {
      * @param config
      */
     public void initialization(SerializableConfiguration conf, Conf config) {
-        try {
-            FileIO.refreshFolder(conf, config);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
     }
 
     /**
@@ -176,6 +173,7 @@ public class RP_DBSCAN implements Serializable {
         // Count the number of Cluster in global cell graph.
         var clusters = result.get(0)._2;
         numOfClusters = clusters.size();
+        System.out.println("Number of clusters: " + numOfClusters);
 
         /**
          * Phase III-2: Point Labeling
@@ -191,12 +189,25 @@ public class RP_DBSCAN implements Serializable {
         //union the two results.
         JavaPairRDD<Integer, ApproximatedPoint> assignedResult = borderPts.union(corePts).persist(StorageLevel.MEMORY_AND_DISK_SER());
 
+        System.out.println("Total labeled points: " + assignedResult.count());
+
+
         //count the number of points in each cluster.
         numOfPtsInCluster = assignedResult.mapPartitionsToPair(new Methods.CountForEachCluster()).reduceByKey(new Methods.AggregateCount()).collect();
         JavaPairRDD<Long, Integer> clusterLabels = assignedResult.flatMapToPair(new Methods.FlatMapPointIdToClusterId());
 
         if (cfg.pairOutputPath != null) {
-            clusterLabels.saveAsTextFile(cfg.pairOutputPath);
+            try {
+                FileSystem fs = FileSystem.get(conf);
+                Path resultPath = new Path(cfg.pairOutputPath);
+                if (fs.exists(resultPath)) {
+                    fs.delete(resultPath, true);
+                }
+                clusterLabels.saveAsTextFile(cfg.pairOutputPath);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+
         } else {
             System.out.println("Collected all labels. Num: " + clusterLabels.count());
         }

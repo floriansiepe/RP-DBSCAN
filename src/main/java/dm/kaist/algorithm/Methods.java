@@ -126,6 +126,9 @@ public class Methods implements Serializable {
         @Override
         public Iterator<Tuple2<Long, Integer>> call(Tuple2<Integer, ApproximatedPoint> tuple) throws Exception {
             var clusterId = tuple._1;
+            if (tuple._2.ptsIds == null) {
+                return Collections.emptyIterator();
+            }
             return tuple._2.ptsIds.stream()
                     .map(ptId -> new Tuple2<>(ptId, clusterId))
                     .iterator();
