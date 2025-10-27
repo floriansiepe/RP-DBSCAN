@@ -217,7 +217,7 @@ public class RP_DBSCAN implements Serializable {
 			System.out.println("CLUSTER ["+(entry.getKey()+1)+"] : "+ entry.getValue());
 		*/
 
-
+        assignedResult.unpersist();
     }
 
     /**
