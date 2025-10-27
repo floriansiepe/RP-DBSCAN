@@ -2,12 +2,12 @@ package dm.kaist.algorithm;
 
 import dm.kaist.dictionary.ApproximatedCell;
 import dm.kaist.dictionary.Dictionary;
+import dm.kaist.graph.Cluster;
 import dm.kaist.graph.Edge;
 import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.FileIO;
 import dm.kaist.io.SerializableConfiguration;
 import dm.kaist.partition.Partition;
-import org.apache.commons.lang3.ObjectUtils.Null;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -19,6 +19,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 
 public class RP_DBSCAN implements Serializable {
@@ -28,7 +29,7 @@ public class RP_DBSCAN implements Serializable {
     public SerializableConfiguration conf = null;
     public JavaPairRDD<Integer, ApproximatedCell> dataset = null;
     public List<Dictionary> metaPaths = null;
-    public List<String> corePaths = null;
+    public HashSet<Long> corePaths = null;
     public JavaPairRDD<Integer, Edge> edgeSet = null;
 
     //meta result of RP-DBSCAN
@@ -138,24 +139,17 @@ public class RP_DBSCAN implements Serializable {
         //Mark core cells and core points with the (eps,rho)-region query.
         JavaPairRDD<Long, ApproximatedCell> coreCells = dataset.mapPartitionsToPair(new Methods.FindCorePointsWithApproximation(cfg.dim, cfg.epsilon, cfg.minPts, sconf, metaPathsLocal, cfg.coreInfoFolder)).persist(StorageLevel.MEMORY_AND_DISK_SER());
 
+        corePaths = new HashSet<>(coreCells.map(x -> x._1).collect());
         //Count the number of core cells
         List<Tuple2<Integer, Long>> numOfCores = coreCells.mapToPair(new Methods.CountCorePts()).reduceByKey(new Methods.AggregateCount()).collect();
         numOfCorePoints = numOfCores.get(0)._2;
 
-        //Broadcast core cell ids to every workers for updating the status of edges in cell subgraphs.
-        try {
-            corePaths = FileIO.broadCastData(sc, sconf, cfg.coreInfoFolder);
-        } catch (IOException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
-        }
 
         /**
          * Phase II-2: Subgraph Building
          */
         // Build cell subgraph
-        final java.util.List<String> corePathsLocal = this.corePaths;
-        edgeSet = coreCells.mapPartitionsToPair(new Methods.FindDirectDensityReachableEdgesWithApproximation(cfg.dim, cfg.epsilon, cfg.minPts, sconf, metaPathsLocal, corePathsLocal, cfg.numOfPartitions)).repartition(cfg.numOfPartitions / 2);
+        edgeSet = coreCells.mapPartitionsToPair(new Methods.FindDirectDensityReachableEdgesWithApproximation(cfg.dim, cfg.epsilon, cfg.minPts, sconf, metaPathsLocal, corePaths, cfg.numOfPartitions)).repartition(cfg.numOfPartitions / 2);
 
     }
 
@@ -167,7 +161,7 @@ public class RP_DBSCAN implements Serializable {
         // Create local final copies of instance fields used inside lambdas to avoid capturing 'this'
         final Conf cfg = this.config;
         final SerializableConfiguration sconf = this.conf;
-        final java.util.List<String> corePathsLocal = this.corePaths;
+        final HashSet corePathsLocal = this.corePaths;
 
         /**
          * Phase III-1: Progressive Graph Merging
@@ -180,19 +174,20 @@ public class RP_DBSCAN implements Serializable {
             edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePathsLocal, curPartitionSize)).repartition(curPartitionSize);
         }
 
-        List<Tuple2<Integer, Integer>> result = edgeSet.mapPartitionsToPair(new Methods.FinalPhase(sconf, corePathsLocal, cfg.metaResult)).collect();
+        List<Tuple2<Integer, List<Cluster>>> result = edgeSet.mapPartitionsToPair(new Methods.FinalPhase(sconf, corePathsLocal, cfg.metaResult)).collect();
 
         // Count the number of Cluster in global cell graph.
-        numOfClusters = result.get(0)._2;
+        var clusters = result.get(0)._2;
+        numOfClusters = clusters.size();
 
         /**
          * Phase III-2: Point Labeling
          */
         //Assign border points into proper clusters (partially condition of Theorem 3.5).
-        JavaPairRDD<Integer, ApproximatedPoint> borderPts = dataset.flatMapToPair(new Methods.EmitConnectedCoreCellsFromBorderCell(sconf, cfg.numOfPartitions, cfg.metaResult)).groupByKey().flatMapToPair(new Methods.AssignBorderPointToCluster(cfg.dim, cfg.epsilon, sconf, cfg.pairOutputPath, cfg.delimeter));
+        JavaPairRDD<Integer, ApproximatedPoint> borderPts = dataset.flatMapToPair(new Methods.EmitConnectedCoreCellsFromBorderCell(sconf, cfg.numOfPartitions, cfg.metaResult, clusters)).groupByKey().flatMapToPair(new Methods.AssignBorderPointToCluster(cfg.dim, cfg.epsilon, sconf, cfg.pairOutputPath, cfg.delimeter));
 
         //Assign core points into proper clusters (fully condition of Theorem 3.5.
-        JavaPairRDD<Integer, ApproximatedPoint> corePts = dataset.mapPartitionsToPair(new Methods.AssignCorePointToCluster(sconf, cfg.pairOutputPath, cfg.metaResult, cfg.delimeter));
+        JavaPairRDD<Integer, ApproximatedPoint> corePts = dataset.mapPartitionsToPair(new Methods.AssignCorePointToCluster(sconf, cfg.pairOutputPath, cfg.metaResult, cfg.delimeter, clusters));
 
         //Point labeling algorithm 1 : faster than algorithm 2, but not scalable.
         //If out-of-memory error is occurred during the labeling procedure, then use below algorithm 2 for labeling instead of this.
@@ -201,6 +196,11 @@ public class RP_DBSCAN implements Serializable {
 
         //count the number of points in each cluster.
         numOfPtsInCluster = assignedResult.mapPartitionsToPair(new Methods.CountForEachCluster()).reduceByKey(new Methods.AggregateCount()).collect();
+
+        if (cfg.pairOutputPath != null) {
+            JavaPairRDD<Long, Integer> clusterLabels = assignedResult.flatMapToPair(new Methods.FlatMapPointIdToClusterId());
+            clusterLabels.saveAsTextFile(cfg.pairOutputPath);
+        }
 
 
 		/*
@@ -277,5 +277,6 @@ public class RP_DBSCAN implements Serializable {
             bw.write(valueLine.toString() + "\n");
         } catch (IOException e) {
             e.printStackTrace();
-        }    }
+        }
+    }
 }
