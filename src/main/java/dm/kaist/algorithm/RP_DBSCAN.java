@@ -189,14 +189,16 @@ public class RP_DBSCAN implements Serializable {
         //Point labeling algorithm 1 : faster than algorithm 2, but not scalable.
         //If out-of-memory error is occurred during the labeling procedure, then use below algorithm 2 for labeling instead of this.
         //union the two results.
-        JavaPairRDD<Integer, ApproximatedPoint> assignedResult = borderPts.union(corePts);
+        JavaPairRDD<Integer, ApproximatedPoint> assignedResult = borderPts.union(corePts).persist(StorageLevel.MEMORY_AND_DISK_SER());
 
         //count the number of points in each cluster.
         numOfPtsInCluster = assignedResult.mapPartitionsToPair(new Methods.CountForEachCluster()).reduceByKey(new Methods.AggregateCount()).collect();
+        JavaPairRDD<Long, Integer> clusterLabels = assignedResult.flatMapToPair(new Methods.FlatMapPointIdToClusterId());
 
         if (cfg.pairOutputPath != null) {
-            JavaPairRDD<Long, Integer> clusterLabels = assignedResult.flatMapToPair(new Methods.FlatMapPointIdToClusterId());
             clusterLabels.saveAsTextFile(cfg.pairOutputPath);
+        } else {
+            System.out.println("Collected all labels. Num: " + clusterLabels.count());
         }
 
 
