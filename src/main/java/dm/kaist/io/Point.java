@@ -18,8 +18,8 @@ public class Point implements Serializable {
     public boolean isCore = false;
     public int neighborPts = 0;
 
-    public Point(long id, String line, int dim) {
-        String[] toks = line.split(Conf.delimeter);
+    public Point(long id, String line, int dim, String delimeter) {
+        String[] toks = line.split(delimeter);
         // Defensive check: ensure we have enough tokens for the declared dimension.
         if (toks == null || toks.length < dim) {
             throw new IllegalArgumentException("Invalid input line for Point construction. Expected " + dim + " values but got " + (toks == null ? 0 : toks.length) + ". Line: '" + line + "'");
@@ -31,6 +31,9 @@ public class Point implements Serializable {
 
         this.id = id;
         this.coords = coords;
+        if (this.coords.length != dim) {
+            throw new IllegalStateException("Constructor: Point (id=" + this.id + ") has invalid coords length=" + this.coords.length + " for expected dim=" + dim);
+        }
     }
 
     public Point(long id, float[] coords) {

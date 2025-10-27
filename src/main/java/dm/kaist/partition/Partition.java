@@ -10,6 +10,7 @@ import java.util.Map.Entry;
 import java.util.TreeMap;
 
 public class Partition implements Serializable {
+    public int limitDimForVirtualCombining;
     public List<Tuple2<List<Integer>, Long>> subCells;
     public int[] minCoord;
     public int[] maxCoord;
@@ -17,10 +18,11 @@ public class Partition implements Serializable {
     public long count = -1;
     public int partitionId;
 
-    public Partition(List<Tuple2<List<Integer>, Long>> subCells, int dim) {
+    public Partition(List<Tuple2<List<Integer>, Long>> subCells, int dim, int limitDimForVirtualCombining) {
         this.partitionId = (int) System.currentTimeMillis();
         this.subCells = subCells;
         this.dim = dim;
+        this.limitDimForVirtualCombining = limitDimForVirtualCombining;
         minCoord = new int[dim];
         maxCoord = new int[dim];
         setMinMaxCoord();
@@ -100,8 +102,8 @@ public class Partition implements Serializable {
                 right.add(entry);
         }
 
-        subPartitions.add(new Partition(left, this.dim));
-        subPartitions.add(new Partition(right, this.dim));
+        subPartitions.add(new Partition(left, this.dim, this.limitDimForVirtualCombining));
+        subPartitions.add(new Partition(right, this.dim, this.limitDimForVirtualCombining));
 
         return subPartitions;
     }
@@ -118,7 +120,7 @@ public class Partition implements Serializable {
     }
 
     public boolean isContainCell(List<Integer> cellId) {
-        for (int i = 0; i < Conf.limitDimForVirtualCombining; i++)
+        for (int i = 0; i < limitDimForVirtualCombining; i++)
             if (!(cellId.get(i) >= minCoord[i] && cellId.get(i) <= maxCoord[i]))
                 return false;
         return true;

@@ -42,4 +42,15 @@ public class ApproximatedCell implements Serializable {
         return count;
     }
 
+    @Override
+    public String toString() {
+        return "ApproximatedCell{" +
+                "cellId=" + cellId +
+                ", cellCoords=" + cellCoords.toString() +
+                ", count=" + count +
+                ", ptsSize=" + pts.size() +
+                ", ifFullCore=" + ifFullCore +
+                '}';
+    }
+
 }

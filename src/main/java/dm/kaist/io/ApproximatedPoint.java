@@ -9,8 +9,8 @@ public class ApproximatedPoint extends Point implements Serializable {
     public List<Long> ptsIds = null;
     public int count = 0;
 
-    public ApproximatedPoint(long id, String line, int dim) {
-        super(id, line, dim);
+    public ApproximatedPoint(long id, String line, int dim, String delimeter) {
+        super(id, line, dim, delimeter);
         // TODO Auto-generated constructor stub
     }
 

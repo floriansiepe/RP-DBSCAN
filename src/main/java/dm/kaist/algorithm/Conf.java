@@ -8,6 +8,8 @@ import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.Point;
 import org.apache.commons.lang3.ObjectUtils.Null;
 import org.apache.spark.SparkConf;
+import scala.Tuple2;
+import scala.Tuple2$;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -15,29 +17,34 @@ import java.util.HashMap;
 
 public final class Conf implements Serializable {
 
-    //input parameters
-    public static String inputPath = null;
-    public static String metaOutputPath = null;
-    public static String pairOutputPath = null;
-    public static int numOfPartitions = 0;
-    public static float rho = 0;
-    public static int dim = 0;
-    public static int minPts = 0;
-    public static float epsilon = 0;
-    public static int metaBlockWindow = 1;
-    public static boolean boost = false;
 
-    //parameters
-    public static String delimeter = ",";
-    public static String metaFoler = "DICTIONARY";
-    public static String convertTableFolder = "CONVERTS";
-    public static String coreInfoFolder = "CORE_INFO";
-    public static String metaResult = "GLOBAL_CELL_GRAPH";
-    public static int limitDimForVirtualCombining = 6;
-    public static int numOflvhCellsInMetaPartition = 12000000;
-    public static int limitNumOflv1Cell = 1000000;
+    //input parameters (now instance fields)
+    public String inputPath = null;
+    public String metaOutputPath = null;
+    public String pairOutputPath = null;
+    public int numOfPartitions = 0;
+    public float rho = 0;
+    public int dim = 0;
+    public int minPts = 0;
+    public float epsilon = 0;
+    public int metaBlockWindow = 1;
+    public boolean boost = false;
 
-    public static void setInputParameters(String[] args) {
+    //parameters (now instance fields)
+    public String delimeter = ",";
+    public String metaFoler = "DICTIONARY";
+    public String convertTableFolder = "CONVERTS";
+    public String coreInfoFolder = "CORE_INFO";
+    public String metaResult = "GLOBAL_CELL_GRAPH";
+    public int limitDimForVirtualCombining = 6;
+    public int numOflvhCellsInMetaPartition = 12000000;
+    public int limitNumOflv1Cell = 1000000;
+
+    // default constructor
+    public Conf() {
+    }
+
+    public void setInputParameters(String[] args) {
         parseInputForm(args);
 
         if (inputPath == null || metaOutputPath == null || numOfPartitions <= 1 || rho == 0 || dim == 0 || minPts == 0 || epsilon == 0) {
@@ -60,7 +67,7 @@ public final class Conf implements Serializable {
         }
     }
 
-    public static void parseInputForm(String[] args) {
+    public void parseInputForm(String[] args) {
         if (args.length % 2 != 0)
             System.out.println("Argument parsing error.");
 
@@ -90,7 +97,7 @@ public final class Conf implements Serializable {
                 metaBlockWindow = Integer.parseInt(value);
                 //We are now testing this code to boost our algorithm.
             else if (header.equals("-boost")) {
-                if (header.equals("true") || value.equals("TRUE"))
+                if (value != null && value.equalsIgnoreCase("true"))
                     boost = true;
             } else {
                 System.out.println("Argument parsing error!");
@@ -98,25 +105,6 @@ public final class Conf implements Serializable {
             }
         }
 
-    }
-
-    public static SparkConf setSparkConfiguration(String numOfInstance, String numOfCore, String exeMemory, String driverMemory, String overHeap) {
-        SparkConf sparkConf = new SparkConf().setAppName("RP_DBSCAN");
-        sparkConf.set("spark.executor.instances", numOfInstance);
-        sparkConf.set("spark.executor.cores", numOfCore);
-        sparkConf.set("spark.executor.memory", exeMemory);
-        sparkConf.set("spark.driver.memory", driverMemory);
-        sparkConf.set("spark.driver.maxResultSize", "8g");
-        sparkConf.set("spark.yarn.submit.file.replication", "2");
-        sparkConf.set("spark.yarn.driver.memoryOverhead", overHeap);
-        sparkConf.set("spark.yarn.executor.memoryOverhead", overHeap);
-        sparkConf.set("spark.shuffle.service.enabled", "true");
-        sparkConf.set("spark.shuffle.memoryFraction", "0.5");
-        sparkConf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
-        sparkConf.set("spark.kryoserializer.buffer.mb", "256");
-        sparkConf.set("spark.memory.fraction", "0.7");
-        sparkConf.registerKryoClasses(new Class<?>[]{ArrayList.class, Edge.class, Point.class, Null.class, Cell.class, ApproximatedCell.class, ApproximatedPoint.class, LabeledCell.class, HashMap.class});
-        return sparkConf;
     }
 
 }

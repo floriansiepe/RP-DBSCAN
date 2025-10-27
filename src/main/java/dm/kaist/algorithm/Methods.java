@@ -19,6 +19,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.spark.SparkFiles;
+import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.function.Function;
 import org.apache.spark.api.java.function.Function2;
 import org.apache.spark.api.java.function.PairFlatMapFunction;
@@ -34,13 +35,13 @@ import java.util.zip.GZIPOutputStream;
 
 public class Methods implements Serializable {
 
-    public static Tuple2<Long, List<Partition>> scalablePartition(List<Tuple2<List<Integer>, Long>> cellData, int dim, int maxNumOfSubcells, HashMap<List<Integer>, List<Integer>> cellIdToPartitionId) {
+    public static Tuple2<Long, List<Partition>> scalablePartition(List<Tuple2<List<Integer>, Long>> cellData, int dim, int maxNumOfSubcells, HashMap<List<Integer>, List<Integer>> cellIdToPartitionId, int limitDimForVirtualCombining) {
         //As the number of dimensions increases, the number of meta blocks can be extremely increases.
         //Therefore, we limit the number of dimensions to apply BSP approach for dividing our two-level cell dictionary into multiple contiguous sub-dictionaries.
-        if (dim > Conf.limitDimForVirtualCombining)
-            dim = Conf.limitDimForVirtualCombining;
+        if (dim > limitDimForVirtualCombining)
+            dim = limitDimForVirtualCombining;
 
-        Partition initPartition = new Partition(cellData, dim);
+        Partition initPartition = new Partition(cellData, dim, limitDimForVirtualCombining);
 
         List<Partition> wholePartitions = new ArrayList<Partition>();
         wholePartitions.add(initPartition);
@@ -125,22 +126,27 @@ public class Methods implements Serializable {
 
     //Assign each point to an appropriate cell
     public static class PointToCell implements PairFunction<String, List<Integer>, Point> {
+        private String delimeter;
         private int dim = 0;
         private float level1SideLen = 0;
         private long id;
 
-        public PointToCell(int dim, float epsilon, long id) {
+        public PointToCell(int dim, float epsilon, long id, String delimeter) {
             // TODO Auto-generated constructor stub
             this.dim = dim;
             this.level1SideLen = epsilon / (float) Math.sqrt(dim);
             this.id = id;
+            this.delimeter = delimeter;
         }
 
         @Override
         public Tuple2<List<Integer>, Point> call(String value) throws Exception {
             // TODO Auto-generated method stub
-            Point pt = new Point(id, value, dim);
+            Point pt = new Point(id, value, dim, delimeter);
             List<Integer> key = pt.getLevel_1_Coords(level1SideLen, dim);
+            if (key.size() != 2) {
+                throw new IllegalStateException("PointToCell: Point (id=" + pt.id + ") has invalid key size=" + key.size() + " for expected dim=" + dim);
+            }
             return new Tuple2(key, pt);
         }
     }
@@ -161,6 +167,9 @@ public class Methods implements Serializable {
             // TODO Auto-generated method stub
             HashMap<ApproximatedPoint, Integer> emit = new HashMap<ApproximatedPoint, Integer>();
             List<Integer> levelhCoords = pt.getLevel_1_Coords(levelhSideLen, dim);
+            if (levelhCoords.size() != dim) {
+                throw new IllegalStateException("CreateLocalApproximatedPoint: Point (id=" + pt.id + ") has invalid levelhCoords size=" + levelhCoords.size() + " for expected dim=" + dim);
+            }
             float[] coords = new float[levelhCoords.size()];
             for (int i = 0; i < coords.length; i++)
                 coords[i] = (levelhCoords.get(i) + 0.5f) * levelhSideLen;
@@ -187,6 +196,9 @@ public class Methods implements Serializable {
             // TODO Auto-generated method stub
             HashMap<ApproximatedPoint, Integer> emit = map;
             List<Integer> levelhCoords = pt.getLevel_1_Coords(levelhSideLen, dim);
+            if (levelhCoords.size() != dim) {
+                throw new IllegalStateException("LocalApproximation: Point (id=" + pt.id + ") has invalid levelhCoords size=" + levelhCoords.size() + " for expected dim=" + dim);
+            }
             float[] coords = new float[levelhCoords.size()];
             for (int i = 0; i < coords.length; i++)
                 coords[i] = (levelhCoords.get(i) + 0.5f) * levelhSideLen;
@@ -201,11 +213,13 @@ public class Methods implements Serializable {
     }
 
     public static class GlobalApproximation implements Function2<HashMap<ApproximatedPoint, Integer>, HashMap<ApproximatedPoint, Integer>, HashMap<ApproximatedPoint, Integer>> {
+        private int limitNumOflv1Cell;
         private int dim = 0;
 
-        public GlobalApproximation(int dim) {
+        public GlobalApproximation(int dim, int limitNumOflv1Cell) {
             // TODO Auto-generated constructor stub
             this.dim = dim;
+            this.limitNumOflv1Cell = limitNumOflv1Cell;
         }
 
         @Override
@@ -225,7 +239,7 @@ public class Methods implements Serializable {
             }
 
             //point reduction by removing central objects, not boundary
-            if (pts.size() > Conf.limitNumOflv1Cell) {
+            if (pts.size() > limitNumOflv1Cell) {
                 ApproximatedPoint update = left.entrySet().iterator().next().getKey();
                 left.put(update, left.get(update) + remainNumOfPts);
                 return left;
@@ -243,18 +257,20 @@ public class Methods implements Serializable {
 
     //Pseudo Random Partitioning and Preparation for virtually combining the two-level cell dictionary
     public static class PseudoRandomPartition implements PairFunction<Tuple2<List<Integer>, Iterable<Point>>, List<Integer>, ApproximatedCell> {
+        private int limitDimForVirtualCombining;
         private int dim = 0;
         private float levelpSideLen = 0;
         private int metaBlockWindow = 0;
         private String pairOutputPath = null;
 
-        public PseudoRandomPartition(int dim, float epsilon, float p, int metaBlockWindow, String pairOutputPath) {
+        public PseudoRandomPartition(int dim, float epsilon, float p, int metaBlockWindow, String pairOutputPath, int limitDimForVirtualCombining) {
             // TODO Auto-generated constructor stub
             this.dim = dim;
             int LOWEST_LEVEL = (int) (Math.ceil(1 - Math.log10(p) / Math.log10(2)));
             this.levelpSideLen = epsilon / ((float) Math.sqrt(dim) * (1 << LOWEST_LEVEL - 1));
             this.metaBlockWindow = metaBlockWindow;
             this.pairOutputPath = pairOutputPath;
+            this.limitDimForVirtualCombining = limitDimForVirtualCombining;
         }
 
         @Override
@@ -266,6 +282,9 @@ public class Methods implements Serializable {
             HashMap<List<Integer>, ApproximatedPoint> map = new HashMap<List<Integer>, ApproximatedPoint>();
 
             for (Point pt : pts._2) {
+                if (pt.coords.length != dim) {
+                    throw new IllegalStateException("PseudoRandomPartition: Point (id=" + pt.id + ") has invalid coords length=" + pt.coords.length + " for expected dim=" + dim);
+                }
                 List<Integer> lvH = pt.getLevel_1_Coords(levelpSideLen, dim);
                 if (!map.containsKey(lvH)) {
                     ApproximatedPoint apprPt = new ApproximatedPoint(pt.id, pt.coords);
@@ -289,12 +308,16 @@ public class Methods implements Serializable {
             //For Virtually Combining
             int dimOfCoord = 0;
             for (Integer i : cell.cellCoords) {
-                if (dimOfCoord >= Conf.limitDimForVirtualCombining)
+                if (dimOfCoord >= limitDimForVirtualCombining)
                     break;
 
                 //Block id for virtually combining
                 metaBlockId.add(i / metaBlockWindow);
                 dimOfCoord++;
+            }
+            System.out.println("Test1 " + cell.toString());
+            if (cell.cellCoords.size() != dim) {
+                throw new IllegalStateException("PseudoRandomPartition: cell has invalid coords size=" + cell.cellCoords.size() + " for expected dim=" + dim);
             }
             return new Tuple2<List<Integer>, ApproximatedCell>(metaBlockId, cell);
         }
@@ -302,11 +325,13 @@ public class Methods implements Serializable {
 
     //Version 2, Pseudo Random Partitioning and Preparation for virtually combining the two-level cell dictionary
     public static class PseudoRandomPartition2 implements PairFunction<Tuple2<List<Integer>, HashMap<ApproximatedPoint, Integer>>, List<Integer>, ApproximatedCell> {
+        private int limitDimForVirtualCombining;
         private int metaBlockWindow = 0;
 
-        public PseudoRandomPartition2(int metaBlockWindow) {
+        public PseudoRandomPartition2(int metaBlockWindow, int limitDimForVirtualCombining) {
             // TODO Auto-generated constructor stub
             this.metaBlockWindow = metaBlockWindow;
+            this.limitDimForVirtualCombining = limitDimForVirtualCombining;
         }
 
         @Override
@@ -320,7 +345,7 @@ public class Methods implements Serializable {
             List<Integer> metaBlockId = new ArrayList<Integer>();
             int dimOfCoord = 0;
             for (Integer i : cell.cellCoords) {
-                if (dimOfCoord >= Conf.limitDimForVirtualCombining)
+                if (dimOfCoord >= limitDimForVirtualCombining)
                     break;
 
                 metaBlockId.add(i / metaBlockWindow);
@@ -404,10 +429,21 @@ public class Methods implements Serializable {
 
     //Virtually combining sub-dictionaries
     public static class MetaBlockMergeWithApproximation implements PairFunction<Tuple2<List<Integer>, ApproximatedCell>, List<Integer>, Long> {
+        private final int dim;
+
+        public MetaBlockMergeWithApproximation(int dim) {
+            this.dim = dim;
+        }
         @Override
         public Tuple2<List<Integer>, Long> call(Tuple2<List<Integer>, ApproximatedCell> block) throws Exception {
             // TODO Auto-generated method stub
-            return new Tuple2<List<Integer>, Long>(block._1, (long) block._2.getApproximatedPtsCount());
+            // Make a defensive copy of the key list so callers receive an independent list instance
+            // (prevents accidental shared-mutable-list bugs when keys are reused or mutated elsewhere).
+            if (block._1.size() != dim) {
+                throw new IllegalStateException("MetaBlockMergeWithApproximation: block has invalid coords size=" + block._1.size() + " for expected dim=" + dim);
+            }
+
+            return new Tuple2<>(block._1, (long) block._2.getApproximatedPtsCount());
         }
     }
 
@@ -448,7 +484,8 @@ public class Methods implements Serializable {
     }
 
     //Build sub-dictionaries
-    public static class MetaGenerationWithApproximation implements PairFunction<Tuple2<Integer, Iterable<ApproximatedCell>>, Null, Null> {
+    public static class MetaGenerationWithApproximation implements Function<Tuple2<Integer, Iterable<ApproximatedCell>>, Dictionary> {
+        private String metaFoler;
         private int dim = 0;
         private float epsilon = 0;
         private float p = 0;
@@ -457,7 +494,7 @@ public class Methods implements Serializable {
         private Dictionary meta = null;
         private List<Partition> wholePartitions = null;
 
-        public MetaGenerationWithApproximation(int dim, float epsilon, float p, int minPtr, Configuration conf, List<Partition> wholePartitions) {
+        public MetaGenerationWithApproximation(int dim, float epsilon, float p, int minPtr, Configuration conf, List<Partition> wholePartitions, String metaFoler) {
             // TODO Auto-generated constructor stub
             this.dim = dim;
             this.epsilon = epsilon;
@@ -465,49 +502,55 @@ public class Methods implements Serializable {
             this.minPtr = minPtr;
             this.conf = conf;
             this.wholePartitions = wholePartitions;
+            this.metaFoler = metaFoler;
         }
 
         @Override
-        public Tuple2<Null, Null> call(Tuple2<Integer, Iterable<ApproximatedCell>> partition)
+        public Dictionary call(Tuple2<Integer, Iterable<ApproximatedCell>> partition)
                 throws Exception {
             // TODO Auto-generated method stub
 
             meta = new Dictionary(dim, epsilon, p, minPtr);
             meta.generateMetaDataWithApproximation(partition._2);
-            long metaFileName = System.currentTimeMillis();
+            //long metaFileName = System.currentTimeMillis();
 
             //System.out.println("Size of Metadata : "+ (meta.level_1_Meta.length*4 + meta.level_2_Meta.length + meta.level_2_Count.length* 4) + " bytes");
 
             //serialization + gzip compression
+/*
             FileSystem fs = FileSystem.get(conf);
-            BufferedOutputStream bw = new BufferedOutputStream(fs.create(new Path(Conf.metaFoler + "/" + metaFileName + "_" + (int) (Math.random() * 10000) + "_" + (int) (Math.random() * 10000))));
+            BufferedOutputStream bw = new BufferedOutputStream(fs.create(new Path(metaFoler + "/" + metaFileName + "_" + (int) (Math.random() * 10000) + "_" + (int) (Math.random() * 10000))));
             GZIPOutputStream gz = new GZIPOutputStream(bw);
             ObjectOutputStream obs = new ObjectOutputStream(gz);
             obs.writeObject(meta);
             obs.close();
             gz.close();
             bw.close();
+*/
 
-            return new Tuple2<Null, Null>(null, null);
+
+            return meta;
         }
     }
 
     //Core marking procedure
     public static class FindCorePointsWithApproximation implements PairFlatMapFunction<Iterator<Tuple2<Integer, ApproximatedCell>>, Long, ApproximatedCell> {
+        private String coreInfoFolder;
         private int dim = 0;
         private int minPts = 0;
         private float eps = 0;
         private float sqr_r = 0;
         private Configuration conf = null;
-        private List<String> metaPaths = null;
+        private List<Dictionary> metaPaths = null;
 
-        public FindCorePointsWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<String> metaPaths) {
+        public FindCorePointsWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<Dictionary> metaPaths, String coreInfoFolder) {
             this.minPts = minPts;
             this.eps = epsilon;
             this.conf = conf;
             this.metaPaths = metaPaths;
             this.sqr_r = epsilon * epsilon;
             this.dim = dim;
+            this.coreInfoFolder = coreInfoFolder;
         }
 
         @Override
@@ -531,22 +574,14 @@ public class Methods implements Serializable {
                 grids.add(temp._2);
             }
 
-            //load meta directory info
-            int metaSize = metaPaths.size();
-
-            //set read order randomly
-            HashSet<Integer> readOrders = new HashSet<Integer>();
-            while (readOrders.size() < metaSize)
-                readOrders.add((int) (Math.random() * metaSize));
-
             int id = 1;
-            for (Integer readOrder : readOrders) {
+            for (Dictionary meta: metaPaths) {
                 System.out.println("Meta Id : " + (id++));
-                findCoreWithSpecificMeta(readOrder, grids);
+                findCoreWithSpecificMeta(meta, grids);
             }
 
             List<Tuple2<Long, ApproximatedCell>> emits = new ArrayList<Tuple2<Long, ApproximatedCell>>();
-            HashSet<Long> coreCellIds = new HashSet<Long>();
+            //HashSet<Long> coreCellIds = new HashSet<Long>();
             for (ApproximatedCell grid : grids) {
                 List<ApproximatedPoint> corePts = new ArrayList<ApproximatedPoint>();
                 boolean isCoreCell = false;
@@ -559,26 +594,28 @@ public class Methods implements Serializable {
                 }
 
                 if (isCoreCell) {
-                    coreCellIds.add(grid.cellId);
+                    //coreCellIds.add(grid.cellId);
                     grid.pts = corePts;
                     emits.add(new Tuple2<Long, ApproximatedCell>(grid.cellId, grid));
                 }
             }
 
             //write core cell id in hdfs
+/*
             FileSystem fs = FileSystem.get(conf);
-            BufferedOutputStream bw = new BufferedOutputStream(fs.create(new Path(Conf.coreInfoFolder + "/" + System.currentTimeMillis())));
+            BufferedOutputStream bw = new BufferedOutputStream(fs.create(new Path(coreInfoFolder + "/" + System.currentTimeMillis())));
             GZIPOutputStream gz = new GZIPOutputStream(bw);
             ObjectOutputStream obs = new ObjectOutputStream(gz);
             obs.writeObject(coreCellIds);
             obs.close();
             gz.close();
             bw.close();
+*/
 
             return emits.iterator();
         }
 
-        public void findCoreWithSpecificMeta(int readOrder, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
+        public void findCoreWithSpecificMeta(Dictionary meta, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
             float[] coords = new float[dim];
             List<Integer> neighborIdList = new ArrayList<Integer>();
 
@@ -586,6 +623,7 @@ public class Methods implements Serializable {
             List<ApproximatedPoint> innerPts = null;
             int comp = (int) (Math.ceil(Math.sqrt(dim)));
 
+/*
             BufferedInputStream bi = new BufferedInputStream(new FileInputStream(new File(SparkFiles.get(metaPaths.get(readOrder)))));
             GZIPInputStream gis = new GZIPInputStream(bi);
             ObjectInputStream ois = new ObjectInputStream(gis);
@@ -593,6 +631,7 @@ public class Methods implements Serializable {
             ois.close();
             gis.close();
             bi.close();
+*/
 
             meta.buildNeighborSearchTree();
 
@@ -658,12 +697,12 @@ public class Methods implements Serializable {
         private final float sqr_r;
         private final float epsilon;
         private Configuration conf = null;
-        private List<String> metaPaths = null;
+        private List<Dictionary> metaPaths = null;
         private List<String> corePaths = null;
         private Kdtree coreTree = null;
         private int numOfPartition = 0;
 
-        public FindDirectDensityReachableEdgesWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<String> metaPaths, List<String> corePaths, int numOfPartition) {
+        public FindDirectDensityReachableEdgesWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<Dictionary> metaPaths, List<String> corePaths, int numOfPartition) {
             // TODO Auto-generated constructor stub
             this.conf = conf;
             this.dim = dim;
@@ -697,9 +736,9 @@ public class Methods implements Serializable {
                 readOrders.add((int) (Math.random() * metaSize));
 
             int ids = 1;
-            for (Integer readOrder : readOrders) {
+            for (Dictionary meta: metaPaths) {
                 System.out.println("DDR Meta ID : " + (ids++));
-                findDDRWithSpecificMeta(readOrder, edges, grids);
+                findDDRWithSpecificMeta(meta, edges, grids);
             }
 
             //------------------Edge Reduction 1 iteration
@@ -720,7 +759,8 @@ public class Methods implements Serializable {
             return tree.reduceEdgesByMST(mergedCoreCells, edges, numOfPartition / 2).iterator();
         }
 
-        public void findDDRWithSpecificMeta(int readOrder, HashSet<Edge> edges, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
+        public void findDDRWithSpecificMeta(Dictionary meta, HashSet<Edge> edges, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
+/*
             BufferedInputStream bi = new BufferedInputStream(new FileInputStream(new File(SparkFiles.get(metaPaths.get(readOrder)))));
             GZIPInputStream gis = new GZIPInputStream(bi);
             ObjectInputStream ois = new ObjectInputStream(gis);
@@ -728,6 +768,7 @@ public class Methods implements Serializable {
             ois.close();
             gis.close();
             bi.close();
+*/
             meta.buildNeighborSearchTree();
 
             float[] coords = new float[dim];
@@ -886,11 +927,13 @@ public class Methods implements Serializable {
         private Configuration conf = null;
         private HashSet<Long> mergedCoreCells = null;
         private List<String> corePaths = null;
+        private String metaResult = null;
 
-        public FinalPhase(Configuration conf, List<String> corePaths) {
+        public FinalPhase(Configuration conf, List<String> corePaths, String metaResult) {
             this.conf = conf;
             this.mergedCoreCells = new HashSet<Long>();
             this.corePaths = corePaths;
+            this.metaResult = metaResult;
 
         }
 
@@ -1008,7 +1051,7 @@ public class Methods implements Serializable {
             }
 
             //write meta_result file
-            BufferedOutputStream result_output = new BufferedOutputStream(fs.create(new Path(Conf.metaResult + "/meta_result")));
+            BufferedOutputStream result_output = new BufferedOutputStream(fs.create(new Path(metaResult + "/meta_result")));
             GZIPOutputStream gz = new GZIPOutputStream(result_output);
             ObjectOutputStream obs = new ObjectOutputStream(gz);
             obs.writeObject(clusters);
@@ -1032,13 +1075,13 @@ public class Methods implements Serializable {
         HashMap<Long, List<Long>> connectedNeighbors;
         HashMap<Long, Integer> clusterIdMap;
 
-        public EmitConnectedCoreCellsFromBorderCell(Configuration conf, int numOfPartition) {
+        public EmitConnectedCoreCellsFromBorderCell(Configuration conf, int numOfPartition, String metaResult) {
             this.numOfPartition = numOfPartition;
 
             FileSystem fs = null;
             try {
                 fs = FileSystem.get(conf);
-                FileStatus[] status = fs.listStatus(new Path(Conf.metaResult));
+                FileStatus[] status = fs.listStatus(new Path(metaResult));
                 BufferedInputStream bi = new BufferedInputStream(fs.open(status[0].getPath()));
                 GZIPInputStream gis = new GZIPInputStream(bi);
                 ObjectInputStream ois = new ObjectInputStream(gis);
@@ -1070,8 +1113,7 @@ public class Methods implements Serializable {
                 }
 
             } catch (IOException | ClassNotFoundException e) {
-                // TODO Auto-generated catch block
-                e.printStackTrace();
+                throw new RuntimeException(e);
             }
         }
 
@@ -1113,13 +1155,15 @@ public class Methods implements Serializable {
         public float sqr_r = 0;
         public String pairOutputPath = null;
         private Configuration conf = null;
+        public String delimeter;
 
-        public AssignBorderPointToCluster(int dim, float eps, Configuration conf, String pairOutputPath) {
+        public AssignBorderPointToCluster(int dim, float eps, Configuration conf, String pairOutputPath, String delimeter) {
             // TODO Auto-generated constructor stub
             this.dim = dim;
             this.sqr_r = eps * eps;
             this.conf = conf;
             this.pairOutputPath = pairOutputPath;
+            this.delimeter = delimeter;
         }
 
         @Override
@@ -1166,7 +1210,7 @@ public class Methods implements Serializable {
                             //wirte border points
                             if (pairOutputPath != null) {
                                 for (Long id : pt.ptsIds) {
-                                    output = id + Conf.delimeter + coreCell.clusterId + "\n";
+                                    output = id + delimeter + coreCell.clusterId + "\n";
                                     bw.write(output.getBytes());
                                 }
                             }
@@ -1189,18 +1233,20 @@ public class Methods implements Serializable {
     //Labeling core points
     public static class AssignCorePointToCluster implements PairFlatMapFunction<Iterator<Tuple2<Integer, ApproximatedCell>>, Integer, ApproximatedPoint> {
 
+        public String delimeter;
         public List<Cluster> clusters = null;
         public Configuration conf = null;
         public String pairOutputPath = null;
 
-        public AssignCorePointToCluster(Configuration conf, String pairOutputPath) {
+        public AssignCorePointToCluster(Configuration conf, String pairOutputPath, String metaResult, String delimeter) {
             // TODO Auto-generated constructor stub
             this.conf = conf;
             this.pairOutputPath = pairOutputPath;
+            this.delimeter = delimeter;
             FileSystem fs = null;
             try {
                 fs = FileSystem.get(this.conf);
-                FileStatus[] status = fs.listStatus(new Path(Conf.metaResult));
+                FileStatus[] status = fs.listStatus(new Path(metaResult));
                 BufferedInputStream bi = new BufferedInputStream(fs.open(status[0].getPath()));
                 GZIPInputStream gis = new GZIPInputStream(bi);
                 ObjectInputStream ois = new ObjectInputStream(gis);
@@ -1258,7 +1304,7 @@ public class Methods implements Serializable {
                         //write core points
                         if (pairOutputPath != null) {
                             for (Long id : pt.ptsIds) {
-                                output = id + Conf.delimeter + clusterId + "\n";
+                                output = id + delimeter + clusterId + "\n";
                                 bw.write(output.getBytes());
                             }
                         }
