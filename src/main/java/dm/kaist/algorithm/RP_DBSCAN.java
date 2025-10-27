@@ -203,7 +203,7 @@ public class RP_DBSCAN implements Serializable {
                 if (fs.exists(resultPath)) {
                     fs.delete(resultPath, true);
                 }
-                clusterLabels.saveAsTextFile(cfg.pairOutputPath);
+                clusterLabels.coalesce(1).saveAsTextFile(cfg.pairOutputPath);
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
