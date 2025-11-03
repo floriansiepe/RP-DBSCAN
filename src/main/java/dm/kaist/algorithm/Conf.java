@@ -39,6 +39,7 @@ public final class Conf implements Serializable {
     public int limitDimForVirtualCombining = 6;
     public int numOflvhCellsInMetaPartition = 12000000;
     public int limitNumOflv1Cell = 1000000;
+    public String metricsPath = "";
 
     // default constructor
     public Conf() {
@@ -57,6 +58,7 @@ public final class Conf implements Serializable {
             System.out.println(" -dim : the number of dimensions.");
             System.out.println(" -minPts : the minimum number of neighbor points.");
             System.out.println(" -eps : the radius of a neighborhood.");
+            System.out.println(" -M : Metrics output path (local file system).");
             System.out.println("2. Optional parameters");
             System.out.println(" -bs : the block size for virtually combining two-level cell dictionary (default : 1).");
             System.out.println(" -l : the hdfs path to write labeled points, <point id, cluster label> (default : no output).");
@@ -93,6 +95,8 @@ public final class Conf implements Serializable {
                 minPts = Integer.parseInt(value);
             else if (header.equals("-eps"))
                 epsilon = Float.parseFloat(value);
+            else if (header.equals("-M"))
+                metricsPath = value;
             else if (header.equals("-bs"))
                 metaBlockWindow = Integer.parseInt(value);
                 //We are now testing this code to boost our algorithm.

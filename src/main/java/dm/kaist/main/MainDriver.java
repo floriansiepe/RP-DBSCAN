@@ -8,12 +8,15 @@ import dm.kaist.graph.Edge;
 import dm.kaist.graph.LabeledCell;
 import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.Point;
+import metrics.MetricWriter;
+import metrics.entity.ClusterParameters;
+import metrics.entity.DatasetParameters;
+import metrics.entity.Measurement;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaSparkContext;
-import scala.Tuple2;
-import scala.Tuple2$;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 
@@ -45,6 +48,7 @@ public class MainDriver {
         sparkConf.registerKryoClasses(new Class<?>[]{ArrayList.class, Edge.class, Point.class, ObjectUtils.Null.class, Cell.class, ApproximatedCell.class, ApproximatedPoint.class, LabeledCell.class, HashMap.class});
         return sparkConf;
     }
+
     /**
      * @author Hwanjun Song(KAIST), Jae-Gil Lee(KAIST)
      * Created on 18/03/02
@@ -76,8 +80,25 @@ public class MainDriver {
 
         end = System.currentTimeMillis();
 
+        var durationMs = end - start;
+
         //Write meta results
-        rp_dbscan.writeMetaResult((end - start));
+        rp_dbscan.writeMetaResult(durationMs);
+
+        var writer = new MetricWriter(Path.of(conf.metricsPath));
+        var datasetName = conf.inputPath.substring(conf.inputPath.lastIndexOf('/') + 1, conf.inputPath.lastIndexOf('.'));
+        var measurement = new Measurement<>(
+                "RP-DBSCAN",
+                durationMs,
+                new ClusterParameters(
+                        conf.epsilon,
+                        conf.minPts
+                ),
+                new DatasetParameters(
+                        datasetName
+                )
+        );
+        writer.writeMetrics(measurement);
 
         sc.close();
     }
