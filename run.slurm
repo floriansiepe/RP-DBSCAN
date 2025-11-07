@@ -35,40 +35,55 @@ MASTER_NODE_HOSTNAME=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1
 SCRATCH_DIR="/scratch_shared/siepef"
 SHARED_SCRIPT="$SCRATCH_DIR/slurm_job_${SLURM_JOBID}_run.sh"
 
-# Debug: print SLURM environment variables so we can see how the script was started
-echo "SLURM info: JOBID=$SLURM_JOBID, STEP_ID=$SLURM_STEP_ID, PROCID=$SLURM_PROCID, NTASKS=$SLURM_NTASKS, NODES=$SLURM_NNODES, NTASKS_PER_NODE=$SLURM_TASKS_PER_NODE"
-
-# If this script was submitted via sbatch it runs on the controller node only; re-launch it
-# across all allocated tasks so each node runs the same script (one task per node).
-# Use SLURM_STEP_ID as a guard to avoid recursive re-exec inside srun.
-if [ -z "$SLURM_STEP_ID" ] && [ "${NUM_NODES:-0}" -gt 1 ]; then
-    echo "Copying submit script to shared location ($SHARED_SCRIPT) and re-launching script on all nodes with srun..."
-    mkdir -p "$SCRATCH_DIR" || true
-    # Copy the currently executing script (which may be the sbatch spool file) to a shared path
-    if cp "$0" "$SHARED_SCRIPT" 2>/dev/null; then
-        chmod a+x "$SHARED_SCRIPT" || true
-        srun --nodes=$SLURM_NNODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
-             --cpus-per-task=$SLURM_CPUS_PER_TASK --export=ALL bash "$SHARED_SCRIPT" "$@"
-        exit $?
-    else
-        echo "Warning: failed to copy $0 to $SHARED_SCRIPT. Falling back to attempting srun with $0 path (may fail on compute nodes)."
-        srun --nodes=$SLURM_NNODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
-             --cpus-per-task=$SLURM_CPUS_PER_TASK --export=ALL bash "$0" "$@"
-        exit $?
-    fi
+# --- Compute available memory per node and reserve a small chunk for OS ---
+# Prefer SLURM-provided memory; otherwise fall back to /proc/meminfo
+TOTAL_MEM_MB=0
+if [ -n "$SLURM_MEM_PER_NODE" ]; then
+    TOTAL_MEM_MB=$SLURM_MEM_PER_NODE
+elif [ -n "$SLURM_MEM_PER_CPU" ] && [ -n "$SLURM_CPUS_ON_NODE" ]; then
+    TOTAL_MEM_MB=$(( SLURM_MEM_PER_CPU * SLURM_CPUS_ON_NODE ))
+elif [ -r /proc/meminfo ]; then
+    # MemTotal is in kB
+    mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    TOTAL_MEM_MB=$(( mem_kb / 1024 ))
+else
+    TOTAL_MEM_MB=64000  # fallback guess
 fi
 
-# Define paths on the SHARED filesystem
-SPARK_LOG_DIR="$SCRATCH_DIR/spark_job_logs_${SLURM_JOBID}"
-SPARK_CONF_DIR="$SCRATCH_DIR/spark_job_conf_${SLURM_JOBID}"
-BARRIER_DIR="$SCRATCH_DIR/spark_job_barrier_${SLURM_JOBID}" # Directory for our sync files
+# Reserve at least 1 GiB or 5% of node memory (whichever is larger) for OS and daemons
+RESERVE_MB=$(( TOTAL_MEM_MB / 20 ))
+if [ "$RESERVE_MB" -lt 1024 ]; then
+    RESERVE_MB=1024
+fi
 
-# Export key Spark environment variables so all Spark scripts use them.
-export SPARK_LOG_DIR
-export SPARK_CONF_DIR
-export SPARK_WORKER_DIR="$SCRATCH_DIR/spark_worker_data_${SLURM_JOBID}"
+ALLOC_MEM_MB=$(( TOTAL_MEM_MB - RESERVE_MB ))
+if [ "$ALLOC_MEM_MB" -lt 1024 ]; then
+    ALLOC_MEM_MB=$(( TOTAL_MEM_MB * 80 / 100 ))
+fi
 
-echo "Node $(hostname): Rank=$GLOBAL_RANK, Master=$MASTER_NODE_HOSTNAME, Total Nodes=$NUM_NODES"
+# Determine executor memory and overhead: reserve at least 10% or 384MB for overhead (off-heap, native)
+MEMORY_OVERHEAD_MB=$(( ALLOC_MEM_MB / 10 ))
+if [ "$MEMORY_OVERHEAD_MB" -lt 384 ]; then
+    MEMORY_OVERHEAD_MB=384
+fi
+
+# Executor (JVM heap) memory = allocated memory minus overhead
+EXECUTOR_HEAP_MB=$(( ALLOC_MEM_MB - MEMORY_OVERHEAD_MB ))
+if [ "$EXECUTOR_HEAP_MB" -lt 512 ]; then
+    # ensure a sane minimum
+    EXECUTOR_HEAP_MB=$(( ALLOC_MEM_MB * 80 / 100 ))
+fi
+
+# Export Spark worker memory and cores so start-worker uses these values
+export SPARK_WORKER_MEMORY="${ALLOC_MEM_MB}m"
+# Use all CPUs allocated to the SLURM task for the Spark worker
+export SPARK_WORKER_CORES=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE}
+
+# Compute cores settings for submission
+EXECUTOR_CORES=${SPARK_WORKER_CORES:-1}
+TOTAL_EXECUTOR_CORES=$(( EXECUTOR_CORES * NUM_NODES ))
+
+echo "Node $(hostname): TOTAL_MEM_MB=${TOTAL_MEM_MB}MB, RESERVED=${RESERVE_MB}MB, ALLOC_MEM_MB=${ALLOC_MEM_MB}MB, EXECUTOR_HEAP_MB=${EXECUTOR_HEAP_MB}MB, MEMORY_OVERHEAD_MB=${MEMORY_OVERHEAD_MB}MB, SPARK_WORKER_CORES=${SPARK_WORKER_CORES}, TOTAL_EXECUTOR_CORES=${TOTAL_EXECUTOR_CORES}"
 
 # --- 2. Barrier Function ---
 # A function to synchronize all nodes.
@@ -142,9 +157,12 @@ if [ $GLOBAL_RANK == 0 ]; then
     mkdir -p "$SPARK_WORKER_DIR"
     mkdir -p "$BARRIER_DIR"
 
+    # Create spark-defaults.conf with executor/driver defaults. We'll also pass explicit
+    # --conf flags during spark-submit to ensure executors use the per-node allocation.
     cat <<EOF > "$SPARK_CONF_DIR/spark-defaults.conf"
 spark.shuffle.service.enabled       true
 spark.shuffle.service.port          7337
+# Note: spark.executor.memory is set dynamically in the submission command in this script.
 EOF
     echo "Configuration created in $SPARK_CONF_DIR"
 fi
@@ -169,9 +187,11 @@ barrier_sync "master_ready"
 
 # ALL nodes start their services.
 echo "Node $(hostname): Starting daemons..."
+# start shuffle service and worker. start-worker will respect SPARK_WORKER_MEMORY and CORES env vars
 $SPARK_HOME/sbin/start-shuffle-service.sh
 sleep 3 # Give the service a moment to start.
 
+# Provide the master URL for the worker
 $SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:7077"
 echo "Node $(hostname): Shuffle Service and Worker daemons started."
 
@@ -181,10 +201,23 @@ if [ $GLOBAL_RANK == 0 ]; then
     sleep 10
 
     echo "Submitting Spark application..."
+    # Configure executors to use the full per-node allocation (one executor per node)
+    EXECUTOR_MEMORY="${ALLOC_MEM_MB}m"
+    EXECUTOR_CORES=${SPARK_WORKER_CORES:-1}
+    EXECUTOR_INSTANCES=${NUM_NODES}
+    DRIVER_MEMORY="4g"
+
+    echo "Spark submit settings: --conf spark.executor.memory=${EXECUTOR_HEAP_MB}m --conf spark.executor.memoryOverhead=${MEMORY_OVERHEAD_MB} --conf spark.executor.cores=${EXECUTOR_CORES} --total-executor-cores ${TOTAL_EXECUTOR_CORES} --driver-memory=${DRIVER_MEMORY}"
+
     $SPARK_HOME/bin/spark-submit \
       --master "spark://$MASTER_NODE_HOSTNAME:7077" \
       --deploy-mode client \
       --class dm.kaist.main.MainDriver \
+      --driver-memory ${DRIVER_MEMORY} \
+      --conf spark.executor.memory=${EXECUTOR_HEAP_MB}m \
+      --conf spark.executor.memoryOverhead=${MEMORY_OVERHEAD_MB} \
+      --conf spark.executor.cores=${EXECUTOR_CORES} \
+      --total-executor-cores ${TOTAL_EXECUTOR_CORES} \
       /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
       -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
 
