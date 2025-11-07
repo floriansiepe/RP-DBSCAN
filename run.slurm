@@ -30,6 +30,20 @@ GLOBAL_RANK=$SLURM_PROCID
 NUM_NODES=$SLURM_NTASKS
 MASTER_NODE_HOSTNAME=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 
+# Debug: print SLURM environment variables so we can see how the script was started
+echo "SLURM info: JOBID=$SLURM_JOBID, STEP_ID=$SLURM_STEP_ID, PROCID=$SLURM_PROCID, NTASKS=$SLURM_NTASKS, NODES=$SLURM_NNODES, NTASKS_PER_NODE=$SLURM_TASKS_PER_NODE"
+
+# If this script was submitted via sbatch it runs on the controller node only; re-launch it
+# across all allocated tasks so each node runs the same script (one task per node).
+# Use SLURM_STEP_ID as a guard to avoid recursive re-exec inside srun.
+if [ -z "$SLURM_STEP_ID" ] && [ "${NUM_NODES:-0}" -gt 1 ]; then
+    echo "Re-launching script on all nodes with srun (one task per node)..."
+    # export all environment variables to the srun tasks so they see the same env
+    srun --nodes=$SLURM_NNODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+         --cpus-per-task=$SLURM_CPUS_PER_TASK --export=ALL bash "$0" "$@"
+    exit $?
+fi
+
 # Define paths on the SHARED filesystem
 SCRATCH_DIR="/scratch_shared/siepef"
 SPARK_LOG_DIR="$SCRATCH_DIR/spark_job_logs_${SLURM_JOBID}"
