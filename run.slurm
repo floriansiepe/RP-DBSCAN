@@ -8,6 +8,10 @@
 #SBATCH --mail-user=siepef@uni-marburg.de
 #SBATCH --mail-type=END
 #SBATCH --mem=128G
+# Ensure the job gets exclusive access to the allocated nodes to avoid other jobs
+# starting Spark daemons on the same nodes and colliding on ports or resources.
+# This guarantees one Spark cluster per SLURM allocation.
+#SBATCH --exclusive
 
 # 1. Set up the environment
 # It's good practice to load the required Java module.
