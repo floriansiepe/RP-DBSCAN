@@ -185,7 +185,7 @@ if [ $GLOBAL_RANK == 0 ]; then
       --master "spark://$MASTER_NODE_HOSTNAME:7077" \
       --deploy-mode client \
       --class dm.kaist.main.MainDriver \
-      home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
+      /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
       -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
 
     if [ $? -eq 0 ]; then
