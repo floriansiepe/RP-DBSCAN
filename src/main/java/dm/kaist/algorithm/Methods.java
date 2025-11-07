@@ -155,10 +155,10 @@ public class Methods implements Serializable {
             // TODO Auto-generated method stub
             Point pt = new Point(id, value, dim, delimeter);
             List<Integer> key = pt.getLevel_1_Coords(level1SideLen, dim);
-            if (key.size() != 2) {
+            if (key.size() != dim) {
                 throw new IllegalStateException("PointToCell: Point (id=" + pt.id + ") has invalid key size=" + key.size() + " for expected dim=" + dim);
             }
-            return new Tuple2(key, pt);
+            return new Tuple2<>(key, pt);
         }
     }
 
