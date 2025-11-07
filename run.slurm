@@ -4,10 +4,10 @@
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --output=rp-dbscan_output_%j.txt
-#SBATCH --time=01:00:00
-##SBATCH --mail-user=siepef@uni-marburg.de
+#SBATCH --time=05:00:00
+#SBATCH --mail-user=siepef@uni-marburg.de
 #SBATCH --mail-type=END
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 
 # 1. Set up the environment
 # It's good practice to load the required Java module.
