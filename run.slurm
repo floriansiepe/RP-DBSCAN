@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --output=rp-dbscan_output_%j.txt
 #SBATCH --time=01:00:00
-#SBATCH --mail-user=siepef@uni-marburg.de
+##SBATCH --mail-user=siepef@uni-marburg.de
 #SBATCH --mail-type=END
 #SBATCH --mem=64G
 
@@ -30,6 +30,11 @@ GLOBAL_RANK=$SLURM_PROCID
 NUM_NODES=$SLURM_NTASKS
 MASTER_NODE_HOSTNAME=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 
+# Define paths on the SHARED filesystem early so we can place a copy of the submit
+# script on a shared location before re-launching with srun.
+SCRATCH_DIR="/scratch_shared/siepef"
+SHARED_SCRIPT="$SCRATCH_DIR/slurm_job_${SLURM_JOBID}_run.sh"
+
 # Debug: print SLURM environment variables so we can see how the script was started
 echo "SLURM info: JOBID=$SLURM_JOBID, STEP_ID=$SLURM_STEP_ID, PROCID=$SLURM_PROCID, NTASKS=$SLURM_NTASKS, NODES=$SLURM_NNODES, NTASKS_PER_NODE=$SLURM_TASKS_PER_NODE"
 
@@ -37,15 +42,23 @@ echo "SLURM info: JOBID=$SLURM_JOBID, STEP_ID=$SLURM_STEP_ID, PROCID=$SLURM_PROC
 # across all allocated tasks so each node runs the same script (one task per node).
 # Use SLURM_STEP_ID as a guard to avoid recursive re-exec inside srun.
 if [ -z "$SLURM_STEP_ID" ] && [ "${NUM_NODES:-0}" -gt 1 ]; then
-    echo "Re-launching script on all nodes with srun (one task per node)..."
-    # export all environment variables to the srun tasks so they see the same env
-    srun --nodes=$SLURM_NNODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
-         --cpus-per-task=$SLURM_CPUS_PER_TASK --export=ALL bash "$0" "$@"
-    exit $?
+    echo "Copying submit script to shared location ($SHARED_SCRIPT) and re-launching script on all nodes with srun..."
+    mkdir -p "$SCRATCH_DIR" || true
+    # Copy the currently executing script (which may be the sbatch spool file) to a shared path
+    if cp "$0" "$SHARED_SCRIPT" 2>/dev/null; then
+        chmod a+x "$SHARED_SCRIPT" || true
+        srun --nodes=$SLURM_NNODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+             --cpus-per-task=$SLURM_CPUS_PER_TASK --export=ALL bash "$SHARED_SCRIPT" "$@"
+        exit $?
+    else
+        echo "Warning: failed to copy $0 to $SHARED_SCRIPT. Falling back to attempting srun with $0 path (may fail on compute nodes)."
+        srun --nodes=$SLURM_NNODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+             --cpus-per-task=$SLURM_CPUS_PER_TASK --export=ALL bash "$0" "$@"
+        exit $?
+    fi
 fi
 
 # Define paths on the SHARED filesystem
-SCRATCH_DIR="/scratch_shared/siepef"
 SPARK_LOG_DIR="$SCRATCH_DIR/spark_job_logs_${SLURM_JOBID}"
 SPARK_CONF_DIR="$SCRATCH_DIR/spark_job_conf_${SLURM_JOBID}"
 BARRIER_DIR="$SCRATCH_DIR/spark_job_barrier_${SLURM_JOBID}" # Directory for our sync files
@@ -193,4 +206,6 @@ if [ $GLOBAL_RANK == 0 ]; then
     # Clean up the temporary directories.
     echo "Cleaning up shared directories..."
     rm -rf "$SPARK_LOG_DIR" "$SPARK_CONF_DIR" "$SPARK_WORKER_DIR" "$BARRIER_DIR"
+    # Remove the shared copy of the submit script if it was created.
+    rm -f "$SHARED_SCRIPT"
 fi
