@@ -47,20 +47,64 @@ echo "Node $(hostname): Rank=$GLOBAL_RANK, Master=$MASTER_NODE_HOSTNAME, Total N
 # A function to synchronize all nodes.
 function barrier_sync() {
     local barrier_name=$1
+    local timeout=${2:-300}  # default timeout in seconds (optional second arg)
     local barrier_path="$BARRIER_DIR/$barrier_name"
-    mkdir -p "$barrier_path"
 
-    # This node signals it has reached the barrier
-    touch "$barrier_path/node_${GLOBAL_RANK}_ready"
+    # Ensure barrier dir exists (on shared filesystem)
+    mkdir -p "$barrier_path" || { echo "Node $(hostname): ERROR creating barrier path $barrier_path"; return 1; }
 
-    echo "Node $(hostname): Reached barrier '$barrier_name'. Waiting for other nodes..."
+    # Create an atomic per-node marker. mkdir is atomic on POSIX filesystems and avoids races
+    # and some NFS caching oddities; fall back to touch if mkdir not possible.
+    local marker_dir="$barrier_path/node_${GLOBAL_RANK}.ready"
+    if ! mkdir "$marker_dir" 2>/dev/null; then
+        # fallback to a file marker (still ok)
+        : > "$marker_dir" || { echo "Node $(hostname): ERROR creating marker $marker_dir"; return 1; }
+    fi
 
-    # Wait until all nodes have signaled
-    while [ $(ls -1 "$barrier_path" | wc -l) -lt $NUM_NODES ]; do
+    echo "Node $(hostname): Reached barrier '$barrier_name'. Waiting for $NUM_NODES nodes (timeout=${timeout}s)..."
+
+    local start_ts=$(date +%s)
+    local prev_count=-1
+
+    while true; do
+        # Try to reduce NFS metadata caching problems by forcing a local sync and re-reading
+        sync 2>/dev/null || true
+
+        # Count node markers. We include both files and directories that start with node_.
+        # Use a glob to avoid issues with ls formatting; fall back safely if empty.
+        local count=0
+        if [ -d "$barrier_path" ]; then
+            # Use find for robust counting across different ls behaviors
+            count=$(find "$barrier_path" -maxdepth 1 -mindepth 1 -name 'node_*' | wc -l || true)
+        fi
+
+        if [ "$count" -ge "$NUM_NODES" ]; then
+            echo "Node $(hostname): All $count nodes reached barrier '$barrier_name'."
+            break
+        fi
+
+        if [ "$count" -ne "$prev_count" ]; then
+            echo "Node $(hostname): Barrier '$barrier_name' progress: $count/$NUM_NODES"
+            prev_count=$count
+        fi
+
+        local now_ts=$(date +%s)
+        local elapsed=$((now_ts - start_ts))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "Node $(hostname): ERROR: Timeout waiting at barrier '$barrier_name' after ${elapsed}s (expected $NUM_NODES)."
+            echo "Barrier path = $barrier_path"
+            echo "Barrier listing (detailed):"
+            ls -la "$barrier_path" || true
+            echo "Environment: GLOBAL_RANK=$GLOBAL_RANK, NUM_NODES=$NUM_NODES, SLURM_JOB_NODELIST=$SLURM_JOB_NODELIST"
+            # Return non-zero so callers can decide how to handle it
+            return 1
+        fi
+
         sleep 1
     done
 
     echo "Node $(hostname): Passed barrier '$barrier_name'."
+    return 0
 }
 
 # --- 3. Create Cluster Configuration (Master Node Only) ---
