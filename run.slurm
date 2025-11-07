@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=MrDBSCANJob
+#SBATCH --job-name=RpDBSCANJob
 #SBATCH --nodes=4
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --output=mr-dbscan_output_%j.txt
+#SBATCH --output=rp-dbscan_output_%j.txt
 #SBATCH --time=01:00:00
 #SBATCH --mail-user=siepef@uni-marburg.de
 #SBATCH --mail-type=END
