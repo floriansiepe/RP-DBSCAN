@@ -8,10 +8,9 @@
 #SBATCH --mail-user=siepef@uni-marburg.de
 #SBATCH --mail-type=END
 #SBATCH --mem=128G
-# Ensure the job gets exclusive access to the allocated nodes to avoid other jobs
-# starting Spark daemons on the same nodes and colliding on ports or resources.
-# This guarantees one Spark cluster per SLURM allocation.
-#SBATCH --exclusive
+# Note: Running without --exclusive. Isolation is achieved via per-job dynamic ports
+# and separate config/log/worker directories. Be aware of potential resource contention
+# if other jobs share the same nodes.
 
 # 1. Set up the environment
 # It's good practice to load the required Java module.
@@ -34,62 +33,51 @@ GLOBAL_RANK=$SLURM_PROCID
 NUM_NODES=$SLURM_NTASKS
 MASTER_NODE_HOSTNAME=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 
-# Define paths on the SHARED filesystem early so we can place a copy of the submit
-# script on a shared location before re-launching with srun.
+# Shared scratch root
 SCRATCH_DIR="/scratch_shared/siepef"
 SHARED_SCRIPT="$SCRATCH_DIR/slurm_job_${SLURM_JOBID}_run.sh"
 
-# --- Compute available memory per node and reserve a small chunk for OS ---
-# Prefer SLURM-provided memory; otherwise fall back to /proc/meminfo
-TOTAL_MEM_MB=0
+# --- Added: Per-job isolated directories ---
+SPARK_CONF_DIR="$SCRATCH_DIR/spark_conf_${SLURM_JOB_ID}"
+SPARK_LOG_DIR="$SCRATCH_DIR/spark_logs_${SLURM_JOB_ID}"
+SPARK_WORKER_DIR="$SCRATCH_DIR/spark_worker_${SLURM_JOB_ID}"
+BARRIER_DIR="$SCRATCH_DIR/barrier_${SLURM_JOB_ID}"
+SPARK_PID_DIR="$SCRATCH_DIR/spark_pids_${SLURM_JOB_ID}"
+export SPARK_PID_DIR
+
+# --- Added: Dynamic port selection based on job id ---
+# Choose a base port in a high, non-privileged range. We mod into a span to avoid overflow.
+BASE_PORT=$((20000 + (SLURM_JOB_ID % 20000)))
+SPARK_MASTER_PORT=$BASE_PORT
+SPARK_SHUFFLE_PORT=$((BASE_PORT + 1))
+SPARK_UI_PORT=$((BASE_PORT + 2))
+
+# Export so Spark scripts can pick them up
+export SPARK_MASTER_PORT SPARK_SHUFFLE_PORT SPARK_UI_PORT SPARK_MASTER_HOST="$MASTER_NODE_HOSTNAME"
+
+# Cleanup function to ensure cluster teardown even on failure
+function cleanup() {
+  if [ "$GLOBAL_RANK" -eq 0 ]; then
+    echo "[CLEANUP] Stopping Spark daemons for job $SLURM_JOB_ID";
+    if [ -n "$SPARK_HOME" ]; then
+      $SPARK_HOME/sbin/stop-all.sh || true
+      srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-shuffle-service.sh || true
+    fi
+    echo "[CLEANUP] Removing per-job directories";
+    rm -rf "$SPARK_CONF_DIR" "$SPARK_LOG_DIR" "$SPARK_WORKER_DIR" "$BARRIER_DIR" "$SPARK_PID_DIR" || true
+    rm -f "$SHARED_SCRIPT" || true
+  fi
+}
+trap cleanup EXIT
+
+# --- 2. Lightweight Resource Setup ---
+# Rely on SLURM allocation; let Spark use all provided cores and memory.
 if [ -n "$SLURM_MEM_PER_NODE" ]; then
-    TOTAL_MEM_MB=$SLURM_MEM_PER_NODE
-elif [ -n "$SLURM_MEM_PER_CPU" ] && [ -n "$SLURM_CPUS_ON_NODE" ]; then
-    TOTAL_MEM_MB=$(( SLURM_MEM_PER_CPU * SLURM_CPUS_ON_NODE ))
-elif [ -r /proc/meminfo ]; then
-    # MemTotal is in kB
-    mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    TOTAL_MEM_MB=$(( mem_kb / 1024 ))
-else
-    TOTAL_MEM_MB=64000  # fallback guess
+  export SPARK_WORKER_MEMORY="${SLURM_MEM_PER_NODE}m"
 fi
-
-# Reserve at least 1 GiB or 5% of node memory (whichever is larger) for OS and daemons
-RESERVE_MB=$(( TOTAL_MEM_MB / 20 ))
-if [ "$RESERVE_MB" -lt 1024 ]; then
-    RESERVE_MB=1024
-fi
-
-ALLOC_MEM_MB=$(( TOTAL_MEM_MB - RESERVE_MB ))
-if [ "$ALLOC_MEM_MB" -lt 1024 ]; then
-    ALLOC_MEM_MB=$(( TOTAL_MEM_MB * 80 / 100 ))
-fi
-
-# Determine executor memory and overhead: reserve at least 10% or 384MB for overhead (off-heap, native)
-MEMORY_OVERHEAD_MB=$(( ALLOC_MEM_MB / 10 ))
-if [ "$MEMORY_OVERHEAD_MB" -lt 384 ]; then
-    MEMORY_OVERHEAD_MB=384
-fi
-
-# Executor (JVM heap) memory = allocated memory minus overhead
-EXECUTOR_HEAP_MB=$(( ALLOC_MEM_MB - MEMORY_OVERHEAD_MB ))
-if [ "$EXECUTOR_HEAP_MB" -lt 512 ]; then
-    # ensure a sane minimum
-    EXECUTOR_HEAP_MB=$(( ALLOC_MEM_MB * 80 / 100 ))
-fi
-
-# Export Spark worker memory and cores so start-worker uses these values
-export SPARK_WORKER_MEMORY="${ALLOC_MEM_MB}m"
-# Use all CPUs allocated to the SLURM task for the Spark worker
 export SPARK_WORKER_CORES=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE}
 
-# Compute cores settings for submission
-EXECUTOR_CORES=${SPARK_WORKER_CORES:-1}
-TOTAL_EXECUTOR_CORES=$(( EXECUTOR_CORES * NUM_NODES ))
-
-echo "Node $(hostname): TOTAL_MEM_MB=${TOTAL_MEM_MB}MB, RESERVED=${RESERVE_MB}MB, ALLOC_MEM_MB=${ALLOC_MEM_MB}MB, EXECUTOR_HEAP_MB=${EXECUTOR_HEAP_MB}MB, MEMORY_OVERHEAD_MB=${MEMORY_OVERHEAD_MB}MB, SPARK_WORKER_CORES=${SPARK_WORKER_CORES}, TOTAL_EXECUTOR_CORES=${TOTAL_EXECUTOR_CORES}"
-
-# --- 2. Barrier Function ---
+# --- Barrier Function ---
 # A function to synchronize all nodes.
 function barrier_sync() {
     local barrier_name=$1
@@ -109,7 +97,8 @@ function barrier_sync() {
 
     echo "Node $(hostname): Reached barrier '$barrier_name'. Waiting for $NUM_NODES nodes (timeout=${timeout}s)..."
 
-    local start_ts=$(date +%s)
+    local start_ts
+    start_ts=$(date +%s)
     local prev_count=-1
 
     while true; do
@@ -134,10 +123,11 @@ function barrier_sync() {
             prev_count=$count
         fi
 
-        local now_ts=$(date +%s)
+        local now_ts
+        now_ts=$(date +%s)
         local elapsed=$((now_ts - start_ts))
         if [ "$elapsed" -ge "$timeout" ]; then
-            echo "Node $(hostname): ERROR: Timeout waiting at barrier '$barrier_name' after ${elapsed}s (expected $NUM_NODES)."
+            echo "Node $(hostname): ERROR timeout at barrier '$barrier_name' after ${elapsed}s"
             echo "Barrier path = $barrier_path"
             echo "Barrier listing (detailed):"
             ls -la "$barrier_path" || true
@@ -156,19 +146,17 @@ function barrier_sync() {
 # --- 3. Create Cluster Configuration (Master Node Only) ---
 if [ $GLOBAL_RANK == 0 ]; then
     echo "Master node creating shared configuration and directories..."
-    mkdir -p "$SPARK_CONF_DIR"
-    mkdir -p "$SPARK_LOG_DIR"
-    mkdir -p "$SPARK_WORKER_DIR"
-    mkdir -p "$BARRIER_DIR"
+    mkdir -p "$SPARK_CONF_DIR" "$SPARK_LOG_DIR" "$SPARK_WORKER_DIR" "$BARRIER_DIR" "$SPARK_PID_DIR"
 
     # Create spark-defaults.conf with executor/driver defaults. We'll also pass explicit
     # --conf flags during spark-submit to ensure executors use the per-node allocation.
     cat <<EOF > "$SPARK_CONF_DIR/spark-defaults.conf"
 spark.shuffle.service.enabled       true
-spark.shuffle.service.port          7337
-# Note: spark.executor.memory is set dynamically in the submission command in this script.
+spark.shuffle.service.port          ${SPARK_SHUFFLE_PORT}
+spark.ui.port                       ${SPARK_UI_PORT}
+# Note: spark.executor.memory set via spark-submit
 EOF
-    echo "Configuration created in $SPARK_CONF_DIR"
+    echo "Configuration created in $SPARK_CONF_DIR (MasterPort=$SPARK_MASTER_PORT ShufflePort=$SPARK_SHUFFLE_PORT UI=$SPARK_UI_PORT)"
 fi
 
 # Use the barrier to wait for the config to be created.
@@ -176,13 +164,11 @@ barrier_sync "config_ready"
 
 # --- 4. Start Daemons ---
 if [ $GLOBAL_RANK == 0 ]; then
-    echo "Starting Spark Master..."
-    $SPARK_HOME/sbin/start-master.sh
+    echo "Starting Spark Master on $MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT (UI $SPARK_UI_PORT)..."
+    $SPARK_HOME/sbin/start-master.sh --host "$MASTER_NODE_HOSTNAME" --port "$SPARK_MASTER_PORT" --webui-port "$SPARK_UI_PORT"
 
-    echo "Waiting for Spark Master to open port 7077..."
-    while ! (echo > /dev/tcp/$MASTER_NODE_HOSTNAME/7077) &>/dev/null; do
-      sleep 1
-    done
+    echo "Waiting for Spark Master port $SPARK_MASTER_PORT to open..."
+    while ! (echo > /dev/tcp/$MASTER_NODE_HOSTNAME/$SPARK_MASTER_PORT) &>/dev/null; do sleep 1; done
     echo "Spark Master is ready."
 fi
 
@@ -190,59 +176,48 @@ fi
 barrier_sync "master_ready"
 
 # ALL nodes start their services.
-echo "Node $(hostname): Starting daemons..."
+echo "Node $(hostname): Starting daemons (ShufflePort=$SPARK_SHUFFLE_PORT)..."
 # start shuffle service and worker. start-worker will respect SPARK_WORKER_MEMORY and CORES env vars
-$SPARK_HOME/sbin/start-shuffle-service.sh
-sleep 3 # Give the service a moment to start.
-
+$SPARK_HOME/sbin/start-shuffle-service.sh --properties-file "$SPARK_CONF_DIR/spark-defaults.conf" || $SPARK_HOME/sbin/start-shuffle-service.sh
+sleep 2
 # Provide the master URL for the worker
-$SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:7077"
-echo "Node $(hostname): Shuffle Service and Worker daemons started."
+$SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
+echo "Node $(hostname): Worker registered to spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
 
 # --- 5. Submit the Application (Master Node Only) ---
 if [ $GLOBAL_RANK == 0 ]; then
-    echo "Waiting for all workers to register with the Master..."
-    sleep 10
-
-    echo "Submitting Spark application..."
-    # Configure executors to use the full per-node allocation (one executor per node)
-    EXECUTOR_MEMORY="${ALLOC_MEM_MB}m"
-    EXECUTOR_CORES=${SPARK_WORKER_CORES:-1}
-    EXECUTOR_INSTANCES=${NUM_NODES}
+    echo "Waiting for workers to register..."; sleep 8
     DRIVER_MEMORY="4g"
-
-    echo "Spark submit settings: --conf spark.executor.memory=${EXECUTOR_HEAP_MB}m --conf spark.executor.memoryOverhead=${MEMORY_OVERHEAD_MB} --conf spark.executor.cores=${EXECUTOR_CORES} --total-executor-cores ${TOTAL_EXECUTOR_CORES} --driver-memory=${DRIVER_MEMORY}"
-
+    echo "Spark submit: masterPort=${SPARK_MASTER_PORT} workers=${NUM_NODES} cores/worker=${SPARK_WORKER_CORES}"
     $SPARK_HOME/bin/spark-submit \
-      --master "spark://$MASTER_NODE_HOSTNAME:7077" \
+      --master "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" \
       --deploy-mode client \
       --class dm.kaist.main.MainDriver \
       --driver-memory ${DRIVER_MEMORY} \
-      --conf spark.executor.memory=${EXECUTOR_HEAP_MB}m \
-      --conf spark.executor.memoryOverhead=${MEMORY_OVERHEAD_MB} \
-      --conf spark.executor.cores=${EXECUTOR_CORES} \
-      --total-executor-cores ${TOTAL_EXECUTOR_CORES} \
+      --conf spark.shuffle.service.enabled=true \
+      --conf spark.shuffle.service.port=${SPARK_SHUFFLE_PORT} \
       /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
       -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
-
-    if [ $? -eq 0 ]; then
-      echo "Success: Spark job completed."
-    else
-      echo "Error: Spark job failed. Check logs in $SPARK_LOG_DIR"
-    fi
+    if [ $? -eq 0 ]; then echo "Success: Spark job completed."; else echo "Error: Spark job failed."; fi
 fi
 
 # --- 6. Teardown and Cleanup ---
 if [ $GLOBAL_RANK == 0 ]; then
-    echo "Job finished. Waiting before shutting down cluster..."
-    sleep 20
-    echo "Shutting down Spark cluster."
-    $SPARK_HOME/sbin/stop-all.sh
-    # Manually stop shuffle services on all nodes.
-    srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-shuffle-service.sh
-    # Clean up the temporary directories.
-    echo "Cleaning up shared directories..."
-    rm -rf "$SPARK_LOG_DIR" "$SPARK_CONF_DIR" "$SPARK_WORKER_DIR" "$BARRIER_DIR"
-    # Remove the shared copy of the submit script if it was created.
-    rm -f "$SHARED_SCRIPT"
+    echo "Job finished. Allowing cluster to drain before shutdown..."; sleep 15
+    echo "Stopping Spark cluster (master + workers + shuffle services)..."
+    # Stop master and any local workers (master node)
+    $SPARK_HOME/sbin/stop-master.sh || true
+    # Stop workers on all nodes explicitly to avoid touching other clusters
+    srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-worker.sh || true
+    # Stop shuffle services
+    srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-shuffle-service.sh || true
+    # Fallback: kill PIDs recorded in SPARK_PID_DIR (only our job) if still present
+    if [ -d "$SPARK_PID_DIR" ]; then
+      for f in "$SPARK_PID_DIR"/*.pid; do
+        [ -f "$f" ] || continue
+        pid="$(cat "$f" 2>/dev/null)"
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+      done
+    fi
+    echo "Manual cleanup (directories) will be performed by trap.";
 fi
