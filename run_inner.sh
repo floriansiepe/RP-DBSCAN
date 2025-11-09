@@ -46,22 +46,33 @@ barrier() {
   local name=$1 timeout=${2:-300}
   local path="$BAR_DIR/$name"; mkdir -p "$path" || return 1
   local marker="$path/rank_${GLOBAL_RANK}.ready"; : > "$marker"
-  local start=$(date +%s)
+  local start; start=$(date +%s)
   while true; do
-    local count=$(find "$path" -maxdepth 1 -mindepth 1 -name 'rank_*' 2>/dev/null | wc -l)
+    local count; count=$(find "$path" -maxdepth 1 -mindepth 1 -name 'rank_*' 2>/dev/null | wc -l)
     if [ "$count" -ge "$NUM_TASKS" ]; then echo "[BARRIER $name] complete $count/$NUM_TASKS"; break; fi
-    local now=$(date +%s) elapsed=$((now-start))
+    local now; now=$(date +%s)
+    local elapsed=$((now-start))
     if [ $elapsed -ge $timeout ]; then echo "[BARRIER $name] TIMEOUT after $elapsed s"; ls -la "$path"; return 1; fi
+    # Early exit awareness: if master already wrote submit_rc and we're waiting on a later barrier that's impossible -> break
+    if [ -f "$BAR_DIR/submit_rc" ] && [ "$name" != "final_cleanup" ] && [ "$count" -lt "$NUM_TASKS" ] && [ $elapsed -gt 30 ]; then
+      echo "[BARRIER $name] Early break due to detected submit_rc file (master finished)"
+      break
+    fi
     sleep 1
   done
 }
 
-# Master writes Spark config
+# Master writes Spark config (base settings).
 if [ "$GLOBAL_RANK" -eq 0 ]; then
   cat <<EOF > "$SPARK_CONF_DIR/spark-defaults.conf"
 spark.ui.port                       ${SPARK_UI_PORT}
 spark.eventLog.enabled              false
 spark.shuffle.service.enabled       false
+# Prefer Kryo to reduce Java serialization overhead / memory pressure
+spark.serializer                    org.apache.spark.serializer.KryoSerializer
+spark.kryo.unsafe                   true
+# Optionally register classes (edit if needed)
+# spark.kryo.classesToRegister       dm.kaist.dictionary.Cell,dm.kaist.dictionary.Dictionary,dm.kaist.graph.Cluster
 EOF
   echo "[MASTER] Config written (MasterPort=$SPARK_MASTER_PORT UI=$SPARK_UI_PORT)"
 fi
@@ -84,32 +95,105 @@ barrier master_ready || { echo "[ERROR] barrier master_ready failed"; exit 1; }
 if [ -n "$SLURM_MEM_PER_NODE" ]; then export SPARK_WORKER_MEMORY="${SLURM_MEM_PER_NODE}m"; fi
 export SPARK_WORKER_CORES=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE}
 
+# Derive executor sizing (one executor per worker) unless overridden
+if [ -n "$SLURM_MEM_PER_NODE" ]; then
+  TOTAL_MEM_MB=$SLURM_MEM_PER_NODE
+  EXECUTOR_MEM_MB=$(( TOTAL_MEM_MB * 80 / 100 ))   # use 80% of node mem for heap if single executor
+  [ $EXECUTOR_MEM_MB -lt 1024 ] && EXECUTOR_MEM_MB=1024
+  DEFAULT_EXECUTOR_MEMORY="${EXECUTOR_MEM_MB}m"
+else
+  DEFAULT_EXECUTOR_MEMORY="8g"
+fi
+SPARK_EXECUTOR_MEMORY=${SPARK_EXECUTOR_MEMORY:-$DEFAULT_EXECUTOR_MEMORY}
+SPARK_EXECUTOR_CORES=${SPARK_EXECUTOR_CORES:-$SPARK_WORKER_CORES}
+DRIVER_MEMORY=${DRIVER_MEMORY:-8g}
+
+# Optional automatic splitting into multiple smaller executors to reduce per-task heap footprint (set AUTO_EXECUTOR_SPLIT=1)
+if [ "${AUTO_EXECUTOR_SPLIT:-0}" = "1" ]; then
+  TARGET_CORES_PER_EXEC=${TARGET_CORES_PER_EXEC:-8}
+  if [ $TARGET_CORES_PER_EXEC -lt $SPARK_WORKER_CORES ]; then
+    SPARK_EXECUTOR_CORES=$TARGET_CORES_PER_EXEC
+    EXECUTORS_PER_WORKER=$(( SPARK_WORKER_CORES / SPARK_EXECUTOR_CORES ))
+    [ $EXECUTORS_PER_WORKER -lt 1 ] && EXECUTORS_PER_WORKER=1
+    if [ -n "$SLURM_MEM_PER_NODE" ]; then
+      # Recompute memory per executor (80% of worker memory divided)
+      PER_EXEC_MB=$(( (SLURM_MEM_PER_NODE * 80 / 100) / EXECUTORS_PER_WORKER ))
+      [ $PER_EXEC_MB -lt 1024 ] && PER_EXEC_MB=1024
+      SPARK_EXECUTOR_MEMORY="${PER_EXEC_MB}m"
+    fi
+    SPARK_EXECUTOR_INSTANCES=$(( EXECUTORS_PER_WORKER * NUM_TASKS ))
+    echo "[TUNING] AUTO_EXECUTOR_SPLIT enabled -> executorsPerWorker=$EXECUTORS_PER_WORKER totalInstances=$SPARK_EXECUTOR_INSTANCES coresPerExec=$SPARK_EXECUTOR_CORES memPerExec=$SPARK_EXECUTOR_MEMORY"
+  else
+    echo "[TUNING] AUTO_EXECUTOR_SPLIT requested but TARGET_CORES_PER_EXEC >= worker cores; skipping split"
+  fi
+fi
+
+# Allow user override of parallelism; otherwise 2 * total cores (logical executors * cores)
+if [ -z "$SPARK_DEFAULT_PARALLELISM" ]; then
+  if [ -n "$SPARK_EXECUTOR_INSTANCES" ]; then
+    TOTAL_CORES=$(( SPARK_EXECUTOR_CORES * SPARK_EXECUTOR_INSTANCES ))
+  else
+    TOTAL_CORES=$(( SPARK_EXECUTOR_CORES * NUM_TASKS ))
+  fi
+  SPARK_DEFAULT_PARALLELISM=$(( TOTAL_CORES * 2 ))
+fi
+
 # Start worker on each node
 echo "[WORKER] Host=$HOST Rank=$GLOBAL_RANK starting -> spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT cores=$SPARK_WORKER_CORES mem=$SPARK_WORKER_MEMORY"
 $SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" >> "$SPARK_LOG_DIR/worker_${HOST}.log" 2>&1
 
 barrier workers_started 180 || { echo "[ERROR] barrier workers_started failed"; exit 1; }
 
-# Submit job
+SUBMIT_RC=0
+# Submit job (master only)
 if [ "$GLOBAL_RANK" -eq 0 ]; then
-  echo "[SUBMIT] Submitting application"
-  DRIVER_MEMORY=4g
+  echo "[SUBMIT] Submitting application (executorMemory=$SPARK_EXECUTOR_MEMORY executorCores=$SPARK_EXECUTOR_CORES parallelism=$SPARK_DEFAULT_PARALLELISM instances=${SPARK_EXECUTOR_INSTANCES:-1})"
+  # shellcheck disable=SC2086
   $SPARK_HOME/bin/spark-submit \
     --master "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" \
     --deploy-mode client \
     --class dm.kaist.main.MainDriver \
     --driver-memory $DRIVER_MEMORY \
+    --executor-memory $SPARK_EXECUTOR_MEMORY \
+    --conf spark.executor.cores=$SPARK_EXECUTOR_CORES \
+    ${SPARK_EXECUTOR_INSTANCES:+--conf spark.executor.instances=$SPARK_EXECUTOR_INSTANCES} \
+    --conf spark.default.parallelism=$SPARK_DEFAULT_PARALLELISM \
     --conf spark.shuffle.service.enabled=false \
+    --conf spark.executor.memoryOverhead=$(( ${EXECUTOR_MEM_MB:-4096} / 25 ))m \
+    --conf spark.memory.offHeap.enabled=true \
+    --conf spark.memory.offHeap.size=4g \
+    --conf spark.memory.fraction=0.60 \
+    --conf spark.memory.storageFraction=0.30 \
+    --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+    --conf spark.kryo.unsafe=true \
+    --conf spark.task.maxFailures=4 \
+    --conf spark.executor.extraJavaOptions="-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:+PrintGCDetails -XX:+PrintGCTimeStamps -XX:+UseStringDeduplication" \
+    --conf spark.driver.extraJavaOptions="-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:+UseStringDeduplication" \
     /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
     -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
   SUBMIT_RC=$?
+  echo "$SUBMIT_RC" > "$BAR_DIR/submit_rc"
   echo "[SUBMIT] Exit code $SUBMIT_RC"
   echo "[SHUTDOWN] Stopping master & workers"
   $SPARK_HOME/sbin/stop-master.sh || true
   srun --jobid=$JOBID $SPARK_HOME/sbin/stop-worker.sh || true
 fi
 
-barrier final_cleanup 120 || echo "[WARN] final_cleanup timeout"
+barrier final_cleanup 60 || echo "[WARN] final_cleanup timeout"
 
-echo "[INNER-DONE] Rank $GLOBAL_RANK exiting"
+# Propagate master submit code to every rank
+if [ "$GLOBAL_RANK" -ne 0 ]; then
+  if [ -f "$BAR_DIR/submit_rc" ]; then
+    SUBMIT_RC=$(cat "$BAR_DIR/submit_rc")
+  else
+    echo "[RANK $GLOBAL_RANK] WARNING submit_rc file missing; assuming failure"
+    SUBMIT_RC=1
+  fi
+fi
 
+if [ "$SUBMIT_RC" -ne 0 ]; then
+  echo "[INNER-DONE] Rank $GLOBAL_RANK exiting with FAILURE rc=$SUBMIT_RC"
+else
+  echo "[INNER-DONE] Rank $GLOBAL_RANK exiting with SUCCESS"
+fi
+exit $SUBMIT_RC
