@@ -43,25 +43,40 @@ SPARK_LOG_DIR="$SCRATCH_DIR/spark_logs_${SLURM_JOB_ID}"
 SPARK_WORKER_DIR="$SCRATCH_DIR/spark_worker_${SLURM_JOB_ID}"
 BARRIER_DIR="$SCRATCH_DIR/barrier_${SLURM_JOB_ID}"
 SPARK_PID_DIR="$SCRATCH_DIR/spark_pids_${SLURM_JOB_ID}"
-export SPARK_PID_DIR
+export SPARK_PID_DIR SPARK_CONF_DIR
 
 # --- Added: Dynamic port selection based on job id ---
 # Choose a base port in a high, non-privileged range. We mod into a span to avoid overflow.
 BASE_PORT=$((20000 + (SLURM_JOB_ID % 20000)))
-SPARK_MASTER_PORT=$BASE_PORT
-SPARK_SHUFFLE_PORT=$((BASE_PORT + 1))
-SPARK_UI_PORT=$((BASE_PORT + 2))
+# Helper to find a free port (avoid collision if multiple jobs map to same BASE_PORT)
+pick_free_port() {
+  local candidate=$1
+  local limit=$((candidate+200))
+  while [ $candidate -lt $limit ]; do
+    if ! (echo > /dev/tcp/127.0.0.1/$candidate) &>/dev/null; then
+      echo $candidate
+      return 0
+    fi
+    candidate=$((candidate+1))
+  done
+  # Fallback: just return original if none found (unlikely)
+  echo $1
+}
+SPARK_MASTER_PORT=$(pick_free_port $BASE_PORT)
+SPARK_UI_PORT=$((SPARK_MASTER_PORT + 2))
+# Removed shuffle port (external shuffle service disabled for stability)
 
 # Export so Spark scripts can pick them up
-export SPARK_MASTER_PORT SPARK_SHUFFLE_PORT SPARK_UI_PORT SPARK_MASTER_HOST="$MASTER_NODE_HOSTNAME"
+export SPARK_MASTER_PORT SPARK_UI_PORT SPARK_MASTER_HOST="$MASTER_NODE_HOSTNAME"
 
 # Cleanup function to ensure cluster teardown even on failure
 function cleanup() {
   if [ "$GLOBAL_RANK" -eq 0 ]; then
     echo "[CLEANUP] Stopping Spark daemons for job $SLURM_JOB_ID";
     if [ -n "$SPARK_HOME" ]; then
-      $SPARK_HOME/sbin/stop-all.sh || true
-      srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-shuffle-service.sh || true
+      $SPARK_HOME/sbin/stop-master.sh || true
+      # Stop workers on all nodes explicitly (scoped to allocation)
+      srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-worker.sh || true
     fi
     echo "[CLEANUP] Removing per-job directories";
     rm -rf "$SPARK_CONF_DIR" "$SPARK_LOG_DIR" "$SPARK_WORKER_DIR" "$BARRIER_DIR" "$SPARK_PID_DIR" || true
@@ -147,16 +162,13 @@ function barrier_sync() {
 if [ $GLOBAL_RANK == 0 ]; then
     echo "Master node creating shared configuration and directories..."
     mkdir -p "$SPARK_CONF_DIR" "$SPARK_LOG_DIR" "$SPARK_WORKER_DIR" "$BARRIER_DIR" "$SPARK_PID_DIR"
-
-    # Create spark-defaults.conf with executor/driver defaults. We'll also pass explicit
-    # --conf flags during spark-submit to ensure executors use the per-node allocation.
     cat <<EOF > "$SPARK_CONF_DIR/spark-defaults.conf"
-spark.shuffle.service.enabled       true
-spark.shuffle.service.port          ${SPARK_SHUFFLE_PORT}
 spark.ui.port                       ${SPARK_UI_PORT}
-# Note: spark.executor.memory set via spark-submit
+spark.eventLog.enabled              false
+# External shuffle disabled to avoid executor registration failures in standalone mode
+spark.shuffle.service.enabled       false
 EOF
-    echo "Configuration created in $SPARK_CONF_DIR (MasterPort=$SPARK_MASTER_PORT ShufflePort=$SPARK_SHUFFLE_PORT UI=$SPARK_UI_PORT)"
+    echo "Configuration created in $SPARK_CONF_DIR (MasterPort=$SPARK_MASTER_PORT UI=$SPARK_UI_PORT)"
 fi
 
 # Use the barrier to wait for the config to be created.
@@ -166,7 +178,6 @@ barrier_sync "config_ready"
 if [ $GLOBAL_RANK == 0 ]; then
     echo "Starting Spark Master on $MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT (UI $SPARK_UI_PORT)..."
     $SPARK_HOME/sbin/start-master.sh --host "$MASTER_NODE_HOSTNAME" --port "$SPARK_MASTER_PORT" --webui-port "$SPARK_UI_PORT"
-
     echo "Waiting for Spark Master port $SPARK_MASTER_PORT to open..."
     while ! (echo > /dev/tcp/$MASTER_NODE_HOSTNAME/$SPARK_MASTER_PORT) &>/dev/null; do sleep 1; done
     echo "Spark Master is ready."
@@ -176,11 +187,7 @@ fi
 barrier_sync "master_ready"
 
 # ALL nodes start their services.
-echo "Node $(hostname): Starting daemons (ShufflePort=$SPARK_SHUFFLE_PORT)..."
-# start shuffle service and worker. start-worker will respect SPARK_WORKER_MEMORY and CORES env vars
-$SPARK_HOME/sbin/start-shuffle-service.sh --properties-file "$SPARK_CONF_DIR/spark-defaults.conf" || $SPARK_HOME/sbin/start-shuffle-service.sh
-sleep 2
-# Provide the master URL for the worker
+echo "Node $(hostname): Starting worker (cores=$SPARK_WORKER_CORES memory=$SPARK_WORKER_MEMORY)..."
 $SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
 echo "Node $(hostname): Worker registered to spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
 
@@ -194,8 +201,7 @@ if [ $GLOBAL_RANK == 0 ]; then
       --deploy-mode client \
       --class dm.kaist.main.MainDriver \
       --driver-memory ${DRIVER_MEMORY} \
-      --conf spark.shuffle.service.enabled=true \
-      --conf spark.shuffle.service.port=${SPARK_SHUFFLE_PORT} \
+      --conf spark.shuffle.service.enabled=false \
       /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
       -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
     if [ $? -eq 0 ]; then echo "Success: Spark job completed."; else echo "Error: Spark job failed."; fi
@@ -204,14 +210,9 @@ fi
 # --- 6. Teardown and Cleanup ---
 if [ $GLOBAL_RANK == 0 ]; then
     echo "Job finished. Allowing cluster to drain before shutdown..."; sleep 15
-    echo "Stopping Spark cluster (master + workers + shuffle services)..."
-    # Stop master and any local workers (master node)
+    echo "Stopping Spark cluster (master + workers)..."
     $SPARK_HOME/sbin/stop-master.sh || true
-    # Stop workers on all nodes explicitly to avoid touching other clusters
     srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-worker.sh || true
-    # Stop shuffle services
-    srun --jobid=$SLURM_JOBID $SPARK_HOME/sbin/stop-shuffle-service.sh || true
-    # Fallback: kill PIDs recorded in SPARK_PID_DIR (only our job) if still present
     if [ -d "$SPARK_PID_DIR" ]; then
       for f in "$SPARK_PID_DIR"/*.pid; do
         [ -f "$f" ] || continue
