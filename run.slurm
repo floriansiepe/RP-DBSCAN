@@ -17,6 +17,9 @@ module load openjdk/21.0.2
 # Capture arguments to forward to inner script
 DATASET=$1; DIM=$2; EPS=$3; MINPTS=$4; NUM_PARTITIONS=$5; EXP_DIR=$6; OUT=$7; RHO=$8
 
+# Set spark env
+SPARK_EXECUTOR_MEMORY=100g
+
 # Basic validation
 if [ -z "$RHO" ]; then
   echo "[ERROR] Missing arguments. Expected 8 positional args: dataset dim eps minPts numPartitions expDir out rho"; exit 1; fi
