@@ -12,6 +12,18 @@
 # and separate config/log/worker directories. Be aware of potential resource contention
 # if other jobs share the same nodes.
 
+# Detect distributed mode; initial batch context runs an srun to fan out to all nodes.
+MODE="$1"
+if [ "$MODE" != "distributed" ]; then
+  # First invocation (batch script). Re-run under srun across all tasks/nodes.
+  # Preserve original positional args (dataset..rho) by passing them along after the mode flag.
+  srun bash "$0" distributed "$@"
+  exit $?
+else
+  # Shift off mode so the remaining parameters align with original expectations.
+  shift
+fi
+
 # 1. Set up the environment
 # It's good practice to load the required Java module.
 # The name of the module might differ on your system.
@@ -46,23 +58,9 @@ SPARK_PID_DIR="$SCRATCH_DIR/spark_pids_${SLURM_JOB_ID}"
 export SPARK_PID_DIR SPARK_CONF_DIR
 
 # --- Added: Dynamic port selection based on job id ---
-# Choose a base port in a high, non-privileged range. We mod into a span to avoid overflow.
+# Deterministic master port derived from job id (avoid per-node divergence)
 BASE_PORT=$((20000 + (SLURM_JOB_ID % 20000)))
-# Helper to find a free port (avoid collision if multiple jobs map to same BASE_PORT)
-pick_free_port() {
-  local candidate=$1
-  local limit=$((candidate+200))
-  while [ $candidate -lt $limit ]; do
-    if ! (echo > /dev/tcp/127.0.0.1/$candidate) &>/dev/null; then
-      echo $candidate
-      return 0
-    fi
-    candidate=$((candidate+1))
-  done
-  # Fallback: just return original if none found (unlikely)
-  echo $1
-}
-SPARK_MASTER_PORT=$(pick_free_port $BASE_PORT)
+SPARK_MASTER_PORT=$BASE_PORT
 SPARK_UI_PORT=$((SPARK_MASTER_PORT + 2))
 # Removed shuffle port (external shuffle service disabled for stability)
 
@@ -165,7 +163,6 @@ if [ $GLOBAL_RANK == 0 ]; then
     cat <<EOF > "$SPARK_CONF_DIR/spark-defaults.conf"
 spark.ui.port                       ${SPARK_UI_PORT}
 spark.eventLog.enabled              false
-# External shuffle disabled to avoid executor registration failures in standalone mode
 spark.shuffle.service.enabled       false
 EOF
     echo "Configuration created in $SPARK_CONF_DIR (MasterPort=$SPARK_MASTER_PORT UI=$SPARK_UI_PORT)"
@@ -177,6 +174,14 @@ barrier_sync "config_ready"
 # --- 4. Start Daemons ---
 if [ $GLOBAL_RANK == 0 ]; then
     echo "Starting Spark Master on $MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT (UI $SPARK_UI_PORT)..."
+    # Verify port free before starting; if occupied, increment until free (master only)
+    PORT_CHECK_LIMIT=$((SPARK_MASTER_PORT+50))
+    while (echo > /dev/tcp/127.0.0.1/$SPARK_MASTER_PORT) &>/dev/null; do
+      echo "Port $SPARK_MASTER_PORT busy. Trying next..."
+      SPARK_MASTER_PORT=$((SPARK_MASTER_PORT+1))
+      [ $SPARK_MASTER_PORT -le $PORT_CHECK_LIMIT ] || { echo "No free port found in range."; exit 1; }
+    done
+    export SPARK_MASTER_PORT
     $SPARK_HOME/sbin/start-master.sh --host "$MASTER_NODE_HOSTNAME" --port "$SPARK_MASTER_PORT" --webui-port "$SPARK_UI_PORT"
     echo "Waiting for Spark Master port $SPARK_MASTER_PORT to open..."
     while ! (echo > /dev/tcp/$MASTER_NODE_HOSTNAME/$SPARK_MASTER_PORT) &>/dev/null; do sleep 1; done
