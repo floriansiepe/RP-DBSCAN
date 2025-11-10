@@ -8,6 +8,7 @@
 #SBATCH --mail-user=siepef@uni-marburg.de
 #SBATCH --mail-type=END
 #SBATCH --mem=128G
+#SBATCH --exclusive
 # Note: Cluster orchestration delegated to run_inner.sh launched via srun.
 
 # Load environment once (inner tasks will also load what they need if required)
