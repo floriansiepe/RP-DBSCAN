@@ -115,55 +115,6 @@ if [ "$GLOBAL_RANK" -eq 0 ]; then
     /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
     -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
   SUBMIT_RC=$?
-  echo "[SUBMIT] Exit code $SUBMIT_RC"
-  echo "[MASTER] Launching RC server (no daemon shutdown; Slurm will clean up)"
-  SERVE_COUNT=$((NUM_TASKS-1))
-  if command -v nc &>/dev/null; then
-    for i in $(seq 1 $SERVE_COUNT); do
-      echo "$SUBMIT_RC" | nc -l $RC_PORT || echo "[MASTER] nc serve attempt $i failed";
-      echo "[MASTER] Served RC $i/$SERVE_COUNT"
-    done
-  else
-    python3 - <<PYEOF
-import socket
-rc = str($SUBMIT_RC).encode(); HOST=''; PORT=$RC_PORT
-srv=socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1); srv.bind((HOST,PORT)); srv.listen($SERVE_COUNT)
-served=0; print(f"[MASTER-PY] RC server on {PORT} expecting {$SERVE_COUNT} connections")
-while served < $SERVE_COUNT:
-  c,_=srv.accept(); c.sendall(rc); c.close(); served+=1; print(f"[MASTER-PY] Served {served}/{$SERVE_COUNT}")
-srv.close()
-PYEOF
-  fi
-  echo "[MASTER] RC broadcast complete"
 fi
 
-# Non-master ranks: fetch exit code then exit (leave workers running for Slurm cleanup)
-if [ "$GLOBAL_RANK" -ne 0 ]; then
-  echo "[WORKER-$GLOBAL_RANK] Waiting for RC server on $MASTER_NODE_HOSTNAME:$RC_PORT"
-  WORKER_RC=""
-  for attempt in $(seq 1 60); do
-    if command -v nc &>/dev/null; then
-      WORKER_RC=$(nc $MASTER_NODE_HOSTNAME $RC_PORT 2>/dev/null | tr -d '\r\n')
-    else
-      WORKER_RC=$(python3 - <<PYEOF
-import socket
-try:
-  s=socket.socket(); s.settimeout(1.0); s.connect(("$MASTER_NODE_HOSTNAME", $RC_PORT));
-  d=s.recv(16).decode().strip(); s.close(); print(d)
-except Exception: pass
-PYEOF
-)
-    fi
-    if [[ $WORKER_RC =~ ^[0-9]+$ ]]; then echo "[WORKER-$GLOBAL_RANK] Got RC=$WORKER_RC after attempt $attempt"; break; fi
-    sleep 1
-  done
-  if [[ $WORKER_RC =~ ^[0-9]+$ ]]; then SUBMIT_RC=$WORKER_RC; else echo "[WORKER-$GLOBAL_RANK] WARNING: RC not received; assuming success"; SUBMIT_RC=0; fi
-fi
-
-# No explicit stop of worker/master (delegated to Slurm epilog)
-if [ "$SUBMIT_RC" -ne 0 ]; then
-  echo "[INNER-DONE] Rank $GLOBAL_RANK exiting with FAILURE rc=$SUBMIT_RC"
-else
-  echo "[INNER-DONE] Rank $GLOBAL_RANK exiting with SUCCESS"
-fi
 exit $SUBMIT_RC
