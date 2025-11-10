@@ -1,7 +1,7 @@
 #!/bin/bash
 # Inner distributed script: executed once per Slurm task via srun from run.slurm
 # Arguments: dataset dim eps minPts numPartitions expDir out rho
-# Robust against non-shared filesystem: no cross-node directory synchronization required.
+# Delegated teardown: we do NOT explicitly stop master/worker; Slurm will clean leftover daemons when tasks exit.
 
 module purge
 module load openjdk/21.0.2
@@ -16,11 +16,13 @@ JOBID=$SLURM_JOB_ID
 
 echo "[INNER-INIT] Host=$HOST Rank=$GLOBAL_RANK Tasks=$NUM_TASKS MasterNode=$MASTER_NODE_HOSTNAME JobID=$JOBID"
 
-# Deterministic ports (no shared file needed)
 BASE_PORT=$((20000 + (JOBID % 20000)))
 SPARK_MASTER_PORT=$BASE_PORT
 SPARK_UI_PORT=$((SPARK_MASTER_PORT + 2))
-export SPARK_MASTER_PORT SPARK_UI_PORT SPARK_MASTER_HOST="$MASTER_NODE_HOSTNAME"
+RC_PORT=$((SPARK_MASTER_PORT + 50))
+export SPARK_MASTER_PORT SPARK_UI_PORT SPARK_MASTER_HOST="$MASTER_NODE_HOSTNAME" RC_PORT
+
+echo "[CONFIG] Ports: master=$SPARK_MASTER_PORT ui=$SPARK_UI_PORT rc=$RC_PORT"
 
 # Memory / cores from Slurm
 if [ -n "$SLURM_MEM_PER_NODE" ]; then export SPARK_WORKER_MEMORY="${SLURM_MEM_PER_NODE}m"; fi
@@ -52,7 +54,7 @@ if [ "${AUTO_EXECUTOR_SPLIT:-0}" = "1" ]; then
       SPARK_EXECUTOR_MEMORY="${PER_EXEC_MB}m"
     fi
     SPARK_EXECUTOR_INSTANCES=$(( EXECUTORS_PER_WORKER * NUM_TASKS ))
-    echo "[TUNING] Executor split enabled executorsPerWorker=$EXECUTORS_PER_WORKER instances=$SPARK_EXECUTOR_INSTANCES coresPerExec=$SPARK_EXECUTOR_CORES memPerExec=$SPARK_EXECUTOR_MEMORY"
+    echo "[TUNING] Split executorsPerWorker=$EXECUTORS_PER_WORKER instances=$SPARK_EXECUTOR_INSTANCES coresPerExec=$SPARK_EXECUTOR_CORES memPerExec=$SPARK_EXECUTOR_MEMORY"
   fi
 fi
 
@@ -61,7 +63,6 @@ if [ -z "$SPARK_DEFAULT_PARALLELISM" ]; then
   SPARK_DEFAULT_PARALLELISM=$(( TOTAL_CORES * 2 ))
 fi
 
-# Function: wait for master port open
 wait_for_master() {
   local timeout=${1:-300} start end
   start=$(date +%s)
@@ -72,27 +73,25 @@ wait_for_master() {
   done
 }
 
-# Rank 0: start master
+# --- Master startup (rank 0) ---
 if [ "$GLOBAL_RANK" -eq 0 ]; then
   echo "[MASTER] Starting master host=$MASTER_NODE_HOSTNAME port=$SPARK_MASTER_PORT ui=$SPARK_UI_PORT"
   while (echo > /dev/tcp/127.0.0.1/$SPARK_MASTER_PORT) &>/dev/null; do SPARK_MASTER_PORT=$((SPARK_MASTER_PORT+1)); echo "[MASTER] Port in use bump -> $SPARK_MASTER_PORT"; done
   export SPARK_MASTER_PORT
   $SPARK_HOME/sbin/start-master.sh --host "$MASTER_NODE_HOSTNAME" --port "$SPARK_MASTER_PORT" --webui-port "$SPARK_UI_PORT"
   wait_for_master 120 || { echo "[MASTER] Failed to detect master port open"; exit 1; }
-  echo "[MASTER] Master up on spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
+  echo "[MASTER] Master up spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
 fi
 
-# Non-master ranks wait for master
+# --- Worker startup (all ranks) ---
 if [ "$GLOBAL_RANK" -ne 0 ]; then
   echo "[WORKER-$GLOBAL_RANK] Waiting for master spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
   wait_for_master 600 || { echo "[WORKER-$GLOBAL_RANK] Master not reachable"; exit 1; }
 fi
 
-# Start worker on all ranks (including master if desired). We keep symmetrical startup.
-echo "[WORKER-$GLOBAL_RANK] Starting worker cores=$SPARK_WORKER_CORES mem=$SPARK_WORKER_MEMORY -> spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT"
+echo "[WORKER-$GLOBAL_RANK] Starting worker cores=$SPARK_WORKER_CORES mem=$SPARK_WORKER_MEMORY"
 $SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" || { echo "[WORKER-$GLOBAL_RANK] Failed to start worker"; exit 1; }
 
-# Rank 0 submits job
 SUBMIT_RC=0
 if [ "$GLOBAL_RANK" -eq 0 ]; then
   echo "[SUBMIT] spark-submit (executorMemory=$SPARK_EXECUTOR_MEMORY executorCores=$SPARK_EXECUTOR_CORES parallelism=$SPARK_DEFAULT_PARALLELISM instances=${SPARK_EXECUTOR_INSTANCES:-1})"
@@ -117,31 +116,51 @@ if [ "$GLOBAL_RANK" -eq 0 ]; then
     -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
   SUBMIT_RC=$?
   echo "[SUBMIT] Exit code $SUBMIT_RC"
-  echo "[MASTER] Stopping master"
-  $SPARK_HOME/sbin/stop-master.sh || echo "[MASTER] stop-master returned non-zero"
+  echo "[MASTER] Launching RC server (no daemon shutdown; Slurm will clean up)"
+  SERVE_COUNT=$((NUM_TASKS-1))
+  if command -v nc &>/dev/null; then
+    for i in $(seq 1 $SERVE_COUNT); do
+      echo "$SUBMIT_RC" | nc -l $RC_PORT || echo "[MASTER] nc serve attempt $i failed";
+      echo "[MASTER] Served RC $i/$SERVE_COUNT"
+    done
+  else
+    python3 - <<PYEOF
+import socket
+rc = str($SUBMIT_RC).encode(); HOST=''; PORT=$RC_PORT
+srv=socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1); srv.bind((HOST,PORT)); srv.listen($SERVE_COUNT)
+served=0; print(f"[MASTER-PY] RC server on {PORT} expecting {$SERVE_COUNT} connections")
+while served < $SERVE_COUNT:
+  c,_=srv.accept(); c.sendall(rc); c.close(); served+=1; print(f"[MASTER-PY] Served {served}/{$SERVE_COUNT}")
+srv.close()
+PYEOF
+  fi
+  echo "[MASTER] RC broadcast complete"
 fi
 
-# Workers (including rank0 after submit) wait for master port to close then stop own worker.
+# Non-master ranks: fetch exit code then exit (leave workers running for Slurm cleanup)
 if [ "$GLOBAL_RANK" -ne 0 ]; then
-  echo "[WORKER-$GLOBAL_RANK] Monitoring master port for shutdown"
-  while (echo > /dev/tcp/$MASTER_NODE_HOSTNAME/$SPARK_MASTER_PORT) &>/dev/null; do sleep 2; done
-  echo "[WORKER-$GLOBAL_RANK] Detected master down"
+  echo "[WORKER-$GLOBAL_RANK] Waiting for RC server on $MASTER_NODE_HOSTNAME:$RC_PORT"
+  WORKER_RC=""
+  for attempt in $(seq 1 60); do
+    if command -v nc &>/dev/null; then
+      WORKER_RC=$(nc $MASTER_NODE_HOSTNAME $RC_PORT 2>/dev/null | tr -d '\r\n')
+    else
+      WORKER_RC=$(python3 - <<PYEOF
+import socket
+try:
+  s=socket.socket(); s.settimeout(1.0); s.connect(("$MASTER_NODE_HOSTNAME", $RC_PORT));
+  d=s.recv(16).decode().strip(); s.close(); print(d)
+except Exception: pass
+PYEOF
+)
+    fi
+    if [[ $WORKER_RC =~ ^[0-9]+$ ]]; then echo "[WORKER-$GLOBAL_RANK] Got RC=$WORKER_RC after attempt $attempt"; break; fi
+    sleep 1
+  done
+  if [[ $WORKER_RC =~ ^[0-9]+$ ]]; then SUBMIT_RC=$WORKER_RC; else echo "[WORKER-$GLOBAL_RANK] WARNING: RC not received; assuming success"; SUBMIT_RC=0; fi
 fi
 
-# Stop worker
-echo "[WORKER-$GLOBAL_RANK] Stopping worker"
-$SPARK_HOME/sbin/stop-worker.sh || echo "[WORKER-$GLOBAL_RANK] stop-worker returned non-zero"
-
-# Final safety cleanup for stray daemons
-ps -u "$USER" -o pid,cmd | awk '/org.apache.spark.deploy.(worker.Worker|master.Master)/ {print $1}' | while read -r spid; do kill "$spid" 2>/dev/null || true; done
-
-# Non-master ranks infer success from master shutdown if SUBMIT_RC not propagated; propagate via environment if available
-if [ "$GLOBAL_RANK" -ne 0 ]; then
-  # We cannot read master's rc directly without shared FS; assume success unless stray Spark processes remain.
-  REMAINING=$(ps -u "$USER" -o cmd | grep -c 'org.apache.spark.deploy.worker.Worker' || true)
-  if [ "$REMAINING" -gt 0 ]; then SUBMIT_RC=1; fi
-fi
-
+# No explicit stop of worker/master (delegated to Slurm epilog)
 if [ "$SUBMIT_RC" -ne 0 ]; then
   echo "[INNER-DONE] Rank $GLOBAL_RANK exiting with FAILURE rc=$SUBMIT_RC"
 else
