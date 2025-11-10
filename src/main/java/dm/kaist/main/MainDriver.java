@@ -45,8 +45,8 @@ public class MainDriver {
         SparkConf sparkConf = new SparkConf().setAppName("RP_DBSCAN");
         sparkConf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
         sparkConf.set("spark.kryoserializer.buffer.mb", "256");
-        sparkConf.set("spark.shuffle.memoryFraction", "0.5");
-        sparkConf.set("spark.memory.fraction", "0.7");
+/*        sparkConf.set("spark.shuffle.memoryFraction", "0.5");
+        sparkConf.set("spark.memory.fraction", "0.7");*/
         sparkConf.set("spark.driver.maxResultSize", "8g");
         sparkConf.registerKryoClasses(new Class<?>[]{ArrayList.class, Edge.class, Point.class, ObjectUtils.Null.class, Cell.class, ApproximatedCell.class, ApproximatedPoint.class, LabeledCell.class, HashMap.class});
         return sparkConf;
