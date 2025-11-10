@@ -99,19 +99,18 @@ if [ "$GLOBAL_RANK" -eq 0 ]; then
     --master "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" \
     --deploy-mode client \
     --class dm.kaist.main.MainDriver \
-    --driver-memory $DRIVER_MEMORY \
-    --executor-memory $SPARK_EXECUTOR_MEMORY \
     --conf spark.executor.cores=$SPARK_EXECUTOR_CORES \
     ${SPARK_EXECUTOR_INSTANCES:+--conf spark.executor.instances=$SPARK_EXECUTOR_INSTANCES} \
     --conf spark.default.parallelism=$SPARK_DEFAULT_PARALLELISM \
     --conf spark.shuffle.service.enabled=false \
     --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
     --conf spark.kryo.unsafe=true \
+    --conf spark.executor.memory=$SPARK_EXECUTOR_MEMORY \
     --conf spark.executor.memoryOverhead=4096 \
-    --conf spark.memory.fraction=0.60 \
-    --conf spark.memory.storageFraction=0.30 \
-    --conf spark.executor.extraJavaOptions="-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35" \
-    --conf spark.driver.extraJavaOptions="-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35" \
+    --conf spark.driver.memory=$DRIVER_MEMORY \
+    --conf spark.driver.maxResultSize=8g \
+    --conf spark.executor.extraJavaOptions="-XX:+UseG1GC" \
+    --conf spark.driver.extraJavaOptions="-XX:+UseG1GC" \
     /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
     -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
   SUBMIT_RC=$?
