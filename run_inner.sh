@@ -7,6 +7,8 @@ module purge
 module load openjdk/21.0.2
 
 DATASET=$1; DIM=$2; EPS=$3; MINPTS=$4; NUM_PARTITIONS=$5; EXP_DIR=$6; OUT=$7; RHO=$8
+# Define JOBID early so SCRATCH_DIR expansion includes it
+JOBID=$SLURM_JOB_ID
 SCRATCH_DIR=${SCRATCH_DIR:-/scratch_shared/$USER/scratch-$JOBID}
 mkdir -p "$SCRATCH_DIR"
 
@@ -14,7 +16,6 @@ GLOBAL_RANK=${SLURM_PROCID:-0}
 NUM_TASKS=${SLURM_NTASKS:-1}
 MASTER_NODE_HOSTNAME=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 HOST=$(hostname)
-JOBID=$SLURM_JOB_ID
 
 echo "[INNER-INIT] Host=$HOST Rank=$GLOBAL_RANK Tasks=$NUM_TASKS MasterNode=$MASTER_NODE_HOSTNAME JobID=$JOBID"
 
@@ -101,10 +102,10 @@ if [ "$GLOBAL_RANK" -eq 0 ]; then
     --master "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" \
     --deploy-mode client \
     --class dm.kaist.main.MainDriver \
-    --conf spark.executor.memoryOverhead=4096 \
+    --conf spark.executor.memoryOverhead=2048 \
     --conf spark.driver.memory=$DRIVER_MEMORY \
     --conf spark.executor.memory=$SPARK_EXECUTOR_MEMORY \
-    --conf spark.driver.maxResultSize=8g \
+    --conf spark.driver.maxResultSize=24g \
     /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
     -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR" -S "$SCRATCH_DIR"
   SUBMIT_RC=$?

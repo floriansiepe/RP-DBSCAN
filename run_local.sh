@@ -29,7 +29,7 @@ fi
 
 echo "[LOCAL] Running spark-submit (local[*])"
 "$SPARK_HOME/bin/spark-submit" \
-  --master local[*] \
+  --master spark://MacBook-Pro.local:7077 \
   --deploy-mode client \
   --class dm.kaist.main.MainDriver \
   --conf spark.driver.memory=32g \

@@ -36,7 +36,7 @@ fi
 # Launch one task per node (task layout already allocated). Use --label for clearer logs.
 # Forward positional args.
 set -e
-srun --label -N ${SLURM_NNODES:-4} -n ${SLURM_NTASKS:-4} bash run_inner.sh "$DATASET" "$DIM" "$EPS" "$MINPTS" "$NUM_PARTITIONS" "$EXP_DIR" "$OUT" "$RHO"
+bash run_inner.sh "$DATASET" "$DIM" "$EPS" "$MINPTS" "$NUM_PARTITIONS" "$EXP_DIR" "$OUT" "$RHO"
 rc=$?
 set +e
 echo "[ORCH] srun completed rc=$rc"
