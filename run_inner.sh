@@ -7,7 +7,7 @@ module purge
 module load openjdk/21.0.2
 
 DATASET=$1; DIM=$2; EPS=$3; MINPTS=$4; NUM_PARTITIONS=$5; EXP_DIR=$6; OUT=$7; RHO=$8
-SCRATCH_DIR=${SCRATCH_DIR:-/scratch/$USER/scratch-$JOBID}
+SCRATCH_DIR=${SCRATCH_DIR:-/scratch_shared/$USER/scratch-$JOBID}
 mkdir -p "$SCRATCH_DIR"
 
 GLOBAL_RANK=${SLURM_PROCID:-0}
