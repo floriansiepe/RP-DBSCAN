@@ -1,15 +1,12 @@
 package dm.kaist.algorithm;
 
 import dm.kaist.dictionary.ApproximatedCell;
-import dm.kaist.dictionary.Dictionary;
-import dm.kaist.graph.Cluster;
 import dm.kaist.graph.Edge;
 import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.FileIO;
 import dm.kaist.io.SerializableConfiguration;
 import dm.kaist.partition.Partition;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
+import org.apache.commons.lang3.ObjectUtils.Null;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -21,7 +18,6 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 
 public class RP_DBSCAN implements Serializable {
@@ -30,8 +26,8 @@ public class RP_DBSCAN implements Serializable {
     public JavaSparkContext sc = null;
     public SerializableConfiguration conf = null;
     public JavaPairRDD<Integer, ApproximatedCell> dataset = null;
-    public List<Dictionary> metaPaths = null;
-    public HashSet<Long> corePaths = null;
+    public List<String> metaPaths = null;
+    public List<String> corePaths = null;
     public JavaPairRDD<Integer, Edge> edgeSet = null;
 
     //meta result of RP-DBSCAN
@@ -57,6 +53,13 @@ public class RP_DBSCAN implements Serializable {
      * @param config
      */
     public void initialization(SerializableConfiguration conf, Conf config) {
+        try {
+            //Refresh Folder and Files
+            FileIO.refreshFolder(conf, config);
+        } catch (IOException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -110,11 +113,19 @@ public class RP_DBSCAN implements Serializable {
 
         //Build Two-Level Cell Dictionary composed of multiple sub-dictionaries
         JavaPairRDD<Integer, Iterable<ApproximatedCell>> evenlySplitPartitions = dataMap.flatMapToPair(new Methods.AssignApproximatedPointToPartition(partitionIndex)).groupByKey(wholePartitions.size());
-        JavaRDD<Dictionary> metaDataSet = evenlySplitPartitions.map(new Methods.MetaGenerationWithApproximation(cfg.dim, cfg.epsilon, cfg.rho, cfg.minPts, sconf, wholePartitions, cfg.metaFoler));
-        this.metaPaths = metaDataSet.collect();
+        JavaPairRDD<Null, Null> metaDataSet = evenlySplitPartitions.mapToPair(new Methods.MetaGenerationWithApproximation(cfg.dim, cfg.epsilon, cfg.rho, cfg.minPts, sconf, wholePartitions, cfg.metaFoler));
+        metaDataSet.collect();
 
         //Re-partition the pseudo random partitions into Each Worker by a randomly assigned integer value for reducing the size of memory usage.
         dataset = dataMap.mapToPair(new Methods.Repartition(cfg.numOfPartitions)).repartition(cfg.numOfPartitions).persist(StorageLevel.MEMORY_AND_DISK_SER());
+
+        //Broadcast two-level cell dictionary to every workers.
+        try {
+            metaPaths = FileIO.broadCastData(sc, conf, config.metaFoler);
+        } catch (IOException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -122,28 +133,30 @@ public class RP_DBSCAN implements Serializable {
      * Phase II-1 (Core Marking) and Phase II-2 (Subgraph Building)
      */
     public void phaseII() {
-        // Create local final copies of instance fields used inside lambdas to avoid capturing 'this'
-        final Conf cfg = this.config;
-        final SerializableConfiguration sconf = this.conf;
-        final List<Dictionary> metaPathsLocal = this.metaPaths;
         /**
          * Phase II-1: Core Marking
          */
 
         //Mark core cells and core points with the (eps,rho)-region query.
-        JavaPairRDD<Long, ApproximatedCell> coreCells = dataset.mapPartitionsToPair(new Methods.FindCorePointsWithApproximation(cfg.dim, cfg.epsilon, cfg.minPts, sconf, metaPathsLocal, cfg.coreInfoFolder)).persist(StorageLevel.MEMORY_AND_DISK_SER());
+        JavaPairRDD<Long, ApproximatedCell> coreCells = dataset.mapPartitionsToPair(new Methods.FindCorePointsWithApproximation(config.dim, config.epsilon, config.minPts, conf, metaPaths, config.coreInfoFolder)).persist(StorageLevel.MEMORY_AND_DISK_SER());
 
-        corePaths = new HashSet<>(coreCells.map(x -> x._1).collect());
         //Count the number of core cells
         List<Tuple2<Integer, Long>> numOfCores = coreCells.mapToPair(new Methods.CountCorePts()).reduceByKey(new Methods.AggregateCount()).collect();
         numOfCorePoints = numOfCores.get(0)._2;
 
+        //Broadcast core cell ids to every workers for updating the status of edges in cell subgraphs.
+        try {
+            corePaths = FileIO.broadCastData(sc, conf, config.coreInfoFolder);
+        } catch (IOException e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
 
         /**
          * Phase II-2: Subgraph Building
          */
         // Build cell subgraph
-        edgeSet = coreCells.mapPartitionsToPair(new Methods.FindDirectDensityReachableEdgesWithApproximation(cfg.dim, cfg.epsilon, cfg.minPts, sconf, metaPathsLocal, corePaths, cfg.numOfPartitions)).repartition(cfg.numOfPartitions / 2);
+        edgeSet = coreCells.mapPartitionsToPair(new Methods.FindDirectDensityReachableEdgesWithApproximation(config.dim, config.epsilon, config.minPts, conf, metaPaths, corePaths, config.numOfPartitions)).repartition(config.numOfPartitions / 2);
 
     }
 
@@ -155,7 +168,6 @@ public class RP_DBSCAN implements Serializable {
         // Create local final copies of instance fields used inside lambdas to avoid capturing 'this'
         final Conf cfg = this.config;
         final SerializableConfiguration sconf = this.conf;
-        final HashSet corePathsLocal = this.corePaths;
 
         /**
          * Phase III-1: Progressive Graph Merging
@@ -165,36 +177,31 @@ public class RP_DBSCAN implements Serializable {
         int curPartitionSize = cfg.numOfPartitions;
         while (curPartitionSize != 1) {
             curPartitionSize = curPartitionSize / 2;
-            edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePathsLocal, curPartitionSize)).repartition(curPartitionSize);
+            edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePaths, curPartitionSize, config.edgePath)).repartition(curPartitionSize);
         }
 
-        List<Tuple2<Integer, List<Cluster>>> result = edgeSet.mapPartitionsToPair(new Methods.FinalPhase(sconf, corePathsLocal, cfg.metaResult)).collect();
+        List<Tuple2<Integer, Integer>> result = edgeSet.mapPartitionsToPair(new Methods.FinalPhase(sconf, corePaths, config.metaResult)).collect();
 
         // Count the number of Cluster in global cell graph.
-        var clusters = result.get(0)._2;
-        numOfClusters = clusters.size();
-        System.out.println("Number of clusters: " + numOfClusters);
+        numOfClusters = result.get(0)._2;
 
         /**
          * Phase III-2: Point Labeling
          */
         //Assign border points into proper clusters (partially condition of Theorem 3.5).
-        JavaPairRDD<Integer, ApproximatedPoint> borderPts = dataset.flatMapToPair(new Methods.EmitConnectedCoreCellsFromBorderCell(sconf, cfg.numOfPartitions, cfg.metaResult, clusters)).groupByKey().flatMapToPair(new Methods.AssignBorderPointToCluster(cfg.dim, cfg.epsilon, sconf, cfg.pairOutputPath, cfg.delimeter));
+        JavaPairRDD<Integer, ApproximatedPoint> borderPts = dataset.flatMapToPair(new Methods.EmitConnectedCoreCellsFromBorderCell(sconf, cfg.numOfPartitions, cfg.metaResult)).groupByKey().flatMapToPair(new Methods.AssignBorderPointToCluster(cfg.dim, cfg.epsilon, sconf, cfg.pairOutputPath, cfg.delimeter));
 
         //Assign core points into proper clusters (fully condition of Theorem 3.5.
-        JavaPairRDD<Integer, ApproximatedPoint> corePts = dataset.mapPartitionsToPair(new Methods.AssignCorePointToCluster(sconf, cfg.pairOutputPath, cfg.metaResult, cfg.delimeter, clusters));
+        JavaPairRDD<Integer, ApproximatedPoint> corePts = dataset.mapPartitionsToPair(new Methods.AssignCorePointToCluster(sconf, cfg.pairOutputPath, cfg.metaResult, cfg.delimeter));
 
         //Point labeling algorithm 1 : faster than algorithm 2, but not scalable.
         //If out-of-memory error is occurred during the labeling procedure, then use below algorithm 2 for labeling instead of this.
         //union the two results.
-        JavaPairRDD<Integer, ApproximatedPoint> assignedResult = borderPts.union(corePts).persist(StorageLevel.MEMORY_AND_DISK_SER());
-
-        System.out.println("Total labeled points: " + assignedResult.count());
-
+        JavaPairRDD<Integer, ApproximatedPoint> assignedResult = borderPts.union(corePts);
 
         //count the number of points in each cluster.
         numOfPtsInCluster = assignedResult.mapPartitionsToPair(new Methods.CountForEachCluster()).reduceByKey(new Methods.AggregateCount()).collect();
-        JavaPairRDD<Long, Integer> clusterLabels = assignedResult.flatMapToPair(new Methods.FlatMapPointIdToClusterId());
+        /*JavaPairRDD<Long, Integer> clusterLabels = assignedResult.flatMapToPair(new Methods.FlatMapPointIdToClusterId());
 
         if (cfg.pairOutputPath != null) {
             try {
@@ -211,6 +218,7 @@ public class RP_DBSCAN implements Serializable {
         } else {
             System.out.println("Collected all labels. Num: " + clusterLabels.count());
         }
+         */
 
 
 		/*

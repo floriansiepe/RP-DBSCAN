@@ -13,21 +13,22 @@ import dm.kaist.norm.Norm;
 import dm.kaist.partition.Partition;
 import dm.kaist.tree.Kdnode;
 import dm.kaist.tree.Kdtree;
+import org.apache.commons.lang3.ObjectUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.spark.SparkFiles;
 import org.apache.spark.api.java.function.Function;
 import org.apache.spark.api.java.function.Function2;
 import org.apache.spark.api.java.function.PairFlatMapFunction;
 import org.apache.spark.api.java.function.PairFunction;
 import scala.Tuple2;
 
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.io.ObjectOutputStream;
-import java.io.Serializable;
+import java.io.*;
 import java.util.*;
 import java.util.Map.Entry;
+import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 
@@ -495,7 +496,7 @@ public class Methods implements Serializable {
     }
 
     //Build sub-dictionaries
-    public static class MetaGenerationWithApproximation implements Function<Tuple2<Integer, Iterable<ApproximatedCell>>, Dictionary> {
+    public static class MetaGenerationWithApproximation implements PairFunction<Tuple2<Integer, Iterable<ApproximatedCell>>, ObjectUtils.Null, ObjectUtils.Null> {
         private String metaFoler;
         private int dim = 0;
         private float epsilon = 0;
@@ -517,18 +518,17 @@ public class Methods implements Serializable {
         }
 
         @Override
-        public Dictionary call(Tuple2<Integer, Iterable<ApproximatedCell>> partition)
+        public Tuple2<ObjectUtils.Null, ObjectUtils.Null> call(Tuple2<Integer, Iterable<ApproximatedCell>> partition)
                 throws Exception {
             // TODO Auto-generated method stub
 
             meta = new Dictionary(dim, epsilon, p, minPtr);
             meta.generateMetaDataWithApproximation(partition._2);
-            //long metaFileName = System.currentTimeMillis();
+            long metaFileName = System.currentTimeMillis();
 
             //System.out.println("Size of Metadata : "+ (meta.level_1_Meta.length*4 + meta.level_2_Meta.length + meta.level_2_Count.length* 4) + " bytes");
 
             //serialization + gzip compression
-/*
             FileSystem fs = FileSystem.get(conf);
             BufferedOutputStream bw = new BufferedOutputStream(fs.create(new Path(metaFoler + "/" + metaFileName + "_" + (int) (Math.random() * 10000) + "_" + (int) (Math.random() * 10000))));
             GZIPOutputStream gz = new GZIPOutputStream(bw);
@@ -537,24 +537,22 @@ public class Methods implements Serializable {
             obs.close();
             gz.close();
             bw.close();
-*/
 
-
-            return meta;
+            return new Tuple2<ObjectUtils.Null, ObjectUtils.Null>(null, null);
         }
     }
 
     //Core marking procedure
     public static class FindCorePointsWithApproximation implements PairFlatMapFunction<Iterator<Tuple2<Integer, ApproximatedCell>>, Long, ApproximatedCell> {
-        private String coreInfoFolder;
         private int dim = 0;
         private int minPts = 0;
         private float eps = 0;
         private float sqr_r = 0;
         private Configuration conf = null;
-        private List<Dictionary> metaPaths = null;
+        private List<String> metaPaths = null;
+        private String coreInfoFolder = null;
 
-        public FindCorePointsWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<Dictionary> metaPaths, String coreInfoFolder) {
+        public FindCorePointsWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<String> metaPaths, String coreInfoFolder) {
             this.minPts = minPts;
             this.eps = epsilon;
             this.conf = conf;
@@ -585,13 +583,22 @@ public class Methods implements Serializable {
                 grids.add(temp._2);
             }
 
+            //load meta directory info
+            int metaSize = metaPaths.size();
+
+            //set read order randomly
+            HashSet<Integer> readOrders = new HashSet<Integer>();
+            while (readOrders.size() < metaSize)
+                readOrders.add((int) (Math.random() * metaSize));
+
             int id = 1;
-            for (Dictionary meta : metaPaths) {
-                findCoreWithSpecificMeta(meta, grids);
+            for (Integer readOrder : readOrders) {
+                System.out.println("Meta Id : " + (id++));
+                findCoreWithSpecificMeta(readOrder, grids);
             }
 
             List<Tuple2<Long, ApproximatedCell>> emits = new ArrayList<Tuple2<Long, ApproximatedCell>>();
-            //HashSet<Long> coreCellIds = new HashSet<Long>();
+            HashSet<Long> coreCellIds = new HashSet<Long>();
             for (ApproximatedCell grid : grids) {
                 List<ApproximatedPoint> corePts = new ArrayList<ApproximatedPoint>();
                 boolean isCoreCell = false;
@@ -604,14 +611,13 @@ public class Methods implements Serializable {
                 }
 
                 if (isCoreCell) {
-                    //coreCellIds.add(grid.cellId);
+                    coreCellIds.add(grid.cellId);
                     grid.pts = corePts;
                     emits.add(new Tuple2<Long, ApproximatedCell>(grid.cellId, grid));
                 }
             }
 
             //write core cell id in hdfs
-/*
             FileSystem fs = FileSystem.get(conf);
             BufferedOutputStream bw = new BufferedOutputStream(fs.create(new Path(coreInfoFolder + "/" + System.currentTimeMillis())));
             GZIPOutputStream gz = new GZIPOutputStream(bw);
@@ -620,12 +626,11 @@ public class Methods implements Serializable {
             obs.close();
             gz.close();
             bw.close();
-*/
 
             return emits.iterator();
         }
 
-        public void findCoreWithSpecificMeta(Dictionary meta, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
+        public void findCoreWithSpecificMeta(int readOrder, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
             float[] coords = new float[dim];
             List<Integer> neighborIdList = new ArrayList<Integer>();
 
@@ -633,7 +638,6 @@ public class Methods implements Serializable {
             List<ApproximatedPoint> innerPts = null;
             int comp = (int) (Math.ceil(Math.sqrt(dim)));
 
-/*
             BufferedInputStream bi = new BufferedInputStream(new FileInputStream(new File(SparkFiles.get(metaPaths.get(readOrder)))));
             GZIPInputStream gis = new GZIPInputStream(bi);
             ObjectInputStream ois = new ObjectInputStream(gis);
@@ -641,7 +645,6 @@ public class Methods implements Serializable {
             ois.close();
             gis.close();
             bi.close();
-*/
 
             meta.buildNeighborSearchTree();
 
@@ -707,18 +710,18 @@ public class Methods implements Serializable {
         private final float sqr_r;
         private final float epsilon;
         private Configuration conf = null;
-        private List<Dictionary> metaPaths = null;
-        private HashSet<Long> mergedCoreCells = null;
+        private List<String> metaPaths = null;
+        private List<String> corePaths = null;
         private Kdtree coreTree = null;
         private int numOfPartition = 0;
 
-        public FindDirectDensityReachableEdgesWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<Dictionary> metaPaths, HashSet<Long> mergedCoreCells, int numOfPartition) {
+        public FindDirectDensityReachableEdgesWithApproximation(int dim, float epsilon, int minPts, Configuration conf, List<String> metaPaths, List<String> corePaths, int numOfPartition) {
             // TODO Auto-generated constructor stub
             this.conf = conf;
             this.dim = dim;
             this.minPts = minPts;
             this.metaPaths = metaPaths;
-            this.mergedCoreCells = mergedCoreCells;
+            this.corePaths = corePaths;
             //for direct density reachable search
             this.epsilon = epsilon;
             this.sqr_r = epsilon * epsilon;
@@ -740,12 +743,18 @@ public class Methods implements Serializable {
             //load meta directory info
             int metaSize = metaPaths.size();
 
+            //set read order randomly
+            HashSet<Integer> readOrders = new HashSet<Integer>();
+            while (readOrders.size() < metaSize)
+                readOrders.add((int) (Math.random() * metaSize));
+
             int ids = 1;
-            for (Dictionary meta : metaPaths) {
-                findDDRWithSpecificMeta(meta, edges, grids);
+            for (Integer readOrder : readOrders) {
+                System.out.println("DDR Meta ID : " + (ids++));
+                findDDRWithSpecificMeta(readOrder, edges, grids);
             }
 
-        /*    //------------------Edge Reduction 1 iteration
+            //------------------Edge Reduction 1 iteration
             HashSet<Long> mergedCoreCells = new HashSet<Long>();
             metaSize = corePaths.size();
             for (int i = 0; i < metaSize; i++) {
@@ -759,13 +768,11 @@ public class Methods implements Serializable {
                 bi.close();
             }
 
-*/
             MinimumSpanningTree tree = new MinimumSpanningTree();
             return tree.reduceEdgesByMST(mergedCoreCells, edges, numOfPartition / 2).iterator();
         }
 
-        public void findDDRWithSpecificMeta(Dictionary meta, HashSet<Edge> edges, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
-/*
+        public void findDDRWithSpecificMeta(int readOrder, HashSet<Edge> edges, List<ApproximatedCell> grids) throws IOException, ClassNotFoundException {
             BufferedInputStream bi = new BufferedInputStream(new FileInputStream(new File(SparkFiles.get(metaPaths.get(readOrder)))));
             GZIPInputStream gis = new GZIPInputStream(bi);
             ObjectInputStream ois = new ObjectInputStream(gis);
@@ -773,7 +780,6 @@ public class Methods implements Serializable {
             ois.close();
             gis.close();
             bi.close();
-*/
             meta.buildNeighborSearchTree();
 
             float[] coords = new float[dim];
@@ -841,20 +847,21 @@ public class Methods implements Serializable {
     public static class BuildMST implements PairFlatMapFunction<Iterator<Tuple2<Integer, Edge>>, Integer, Edge> {
         private Configuration conf = null;
         private int nextPartionSize = 0;
-        private HashSet<Long> mergedCoreCells = null;
+        private List<String> corePaths = null;
         private int tastNum = 1;
+        private String edgePath = null;
 
-        public BuildMST(Configuration conf, HashSet<Long> mergedCoreCells, int nextPartitonSize) {
+        public BuildMST(Configuration conf, List<String> corePaths, int nextPartitonSize, String edgePath) {
             this.conf = conf;
-            this.mergedCoreCells = mergedCoreCells;
+            this.corePaths = corePaths;
             this.nextPartionSize = nextPartitonSize;
+            this.edgePath = edgePath;
 
         }
 
         @Override
         public Iterator<Tuple2<Integer, Edge>> call(Iterator<Tuple2<Integer, Edge>> args) throws Exception {
             // TODO Auto-generated method stub
-/*
             HashSet<Long> mergedCoreCells = new HashSet<Long>();
 
             //load core cell ids
@@ -869,7 +876,6 @@ public class Methods implements Serializable {
                 gis.close();
                 bi.close();
             }
-*/
 
             List<Edge> edges = new ArrayList<Edge>();
             while (args.hasNext())
@@ -901,10 +907,9 @@ public class Methods implements Serializable {
                     unknownEdges.add(edge);
             }
 
-/*
             long id = (int) System.currentTimeMillis();
             FileSystem fs = FileSystem.get(conf);
-            BufferedOutputStream result_output = new BufferedOutputStream(fs.create(new Path("EDGES/" + id)));
+            BufferedOutputStream result_output = new BufferedOutputStream(fs.create(new Path(edgePath + "/" + id)));
             GZIPOutputStream gz = new GZIPOutputStream(result_output);
             ObjectOutputStream obs = new ObjectOutputStream(gz);
             obs.writeObject(coreEdges);
@@ -912,7 +917,6 @@ public class Methods implements Serializable {
             gz.close();
 
             result_output.close();
-*/
 
             List<Cluster> clusters = new ArrayList<Cluster>();
 
@@ -932,13 +936,13 @@ public class Methods implements Serializable {
     }
 
     //Build global cell graph
-    public static class FinalPhase implements PairFlatMapFunction<Iterator<Tuple2<Integer, Edge>>, Integer, List<Cluster>> {
+    public static class FinalPhase implements PairFlatMapFunction<Iterator<Tuple2<Integer, Edge>>, Integer, Integer> {
         private Configuration conf = null;
         private HashSet<Long> mergedCoreCells = null;
-        private HashSet corePaths = null;
+        private List<String> corePaths = null;
         private String metaResult = null;
 
-        public FinalPhase(Configuration conf, HashSet corePaths, String metaResult) {
+        public FinalPhase(Configuration conf, List<String> corePaths, String metaResult) {
             this.conf = conf;
             this.mergedCoreCells = new HashSet<Long>();
             this.corePaths = corePaths;
@@ -947,10 +951,10 @@ public class Methods implements Serializable {
         }
 
         @Override
-        public Iterator<Tuple2<Integer, List<Cluster>>> call(Iterator<Tuple2<Integer, Edge>> args) throws Exception {
+        public Iterator<Tuple2<Integer, Integer>> call(Iterator<Tuple2<Integer, Edge>> args) throws Exception {
             // TODO Auto-generated method stub
 
-/*            //load core cell ids
+            //load core cell ids
             FileSystem fs = FileSystem.get(conf);
             int metaSize = corePaths.size();
             for (int i = 0; i < metaSize; i++) {
@@ -962,7 +966,7 @@ public class Methods implements Serializable {
                 ois.close();
                 gis.close();
                 bi.close();
-            }*/
+            }
 
 
             List<Edge> edges = new ArrayList<Edge>();
@@ -1060,7 +1064,6 @@ public class Methods implements Serializable {
             }
 
             //write meta_result file
-/*
             BufferedOutputStream result_output = new BufferedOutputStream(fs.create(new Path(metaResult + "/meta_result")));
             GZIPOutputStream gz = new GZIPOutputStream(result_output);
             ObjectOutputStream obs = new ObjectOutputStream(gz);
@@ -1071,9 +1074,6 @@ public class Methods implements Serializable {
 
             List<Tuple2<Integer, Integer>> emit = new ArrayList<Tuple2<Integer, Integer>>();
             emit.add(new Tuple2<Integer, Integer>(0, clusters.size()));
-*/
-            var emit = new ArrayList<Tuple2<Integer, List<Cluster>>>();
-            emit.add(new Tuple2<Integer, List<Cluster>>(0, clusters));
 
             return emit.iterator();
         }
@@ -1081,51 +1081,56 @@ public class Methods implements Serializable {
 
     //Find predecessor cells of non-core cells
     public static class EmitConnectedCoreCellsFromBorderCell implements PairFlatMapFunction<Tuple2<Integer, ApproximatedCell>, Long, LabeledCell> {
-        public List<Cluster> clusters;
         public int numOfPartition;
 
         HashSet<Long> borderCells;
         HashMap<Long, List<Long>> connectedNeighbors;
         HashMap<Long, Integer> clusterIdMap;
 
-        public EmitConnectedCoreCellsFromBorderCell(Configuration conf, int numOfPartition, String metaResult, List<Cluster> clusters) {
+        public EmitConnectedCoreCellsFromBorderCell(Configuration conf, int numOfPartition, String metaResult) {
             this.numOfPartition = numOfPartition;
 
-            /*
-                            FileSystem fs = null;
-                            fs = FileSystem.get(conf);
-                            FileStatus[] status = fs.listStatus(new Path(metaResult));
-                            BufferedInputStream bi = new BufferedInputStream(fs.open(status[0].getPath()));
-                            GZIPInputStream gis = new GZIPInputStream(bi);
-                            ObjectInputStream ois = new ObjectInputStream(gis);
-                            List<Cluster> clusters = (List<Cluster>) ois.readObject();
-                            ois.close();
-                            gis.close();
-                            bi.close();
-            */
+            FileSystem fs = null;
+            try {
+                fs = FileSystem.get(conf);
+                FileStatus[] status = fs.listStatus(new Path(metaResult));
+                if (status.length == 0) {
+                    throw new FileNotFoundException("Could not find any cells in " + metaResult);
+                }
+                BufferedInputStream bi = new BufferedInputStream(fs.open(status[0].getPath()));
+                GZIPInputStream gis = new GZIPInputStream(bi);
+                ObjectInputStream ois = new ObjectInputStream(gis);
+                List<Cluster> clusters = (List<Cluster>) ois.readObject();
+                ois.close();
+                gis.close();
+                bi.close();
 
-            borderCells = new HashSet<Long>();
-            connectedNeighbors = new HashMap<Long, List<Long>>();
-            clusterIdMap = new HashMap<Long, Integer>();
+                borderCells = new HashSet<Long>();
+                connectedNeighbors = new HashMap<Long, List<Long>>();
+                clusterIdMap = new HashMap<Long, Integer>();
 
-            for (Cluster cluster : clusters) {
-                int clusterId = cluster.clusterId;
-                HashMap<Long, List<Long>> borderCellIds = cluster.borderCellIds;
-                Set<Entry<Long, List<Long>>> entries = borderCellIds.entrySet();
-                for (Entry<Long, List<Long>> entry : entries) {
-                    borderCells.add(entry.getKey());
-                    for (Long coreCell : entry.getValue()) {
-                        if (!connectedNeighbors.containsKey(coreCell))
-                            connectedNeighbors.put(coreCell, new ArrayList<Long>());
+                for (Cluster cluster : clusters) {
+                    int clusterId = cluster.clusterId;
+                    HashMap<Long, List<Long>> borderCellIds = cluster.borderCellIds;
+                    Set<Entry<Long, List<Long>>> entries = borderCellIds.entrySet();
+                    for (Entry<Long, List<Long>> entry : entries) {
+                        borderCells.add(entry.getKey());
+                        for (Long coreCell : entry.getValue()) {
+                            if (!connectedNeighbors.containsKey(coreCell))
+                                connectedNeighbors.put(coreCell, new ArrayList<Long>());
 
-                        if (!clusterIdMap.containsKey(coreCell))
-                            clusterIdMap.put(coreCell, clusterId);
+                            if (!clusterIdMap.containsKey(coreCell))
+                                clusterIdMap.put(coreCell, clusterId);
 
-                        connectedNeighbors.get(coreCell).add(entry.getKey());
+                            connectedNeighbors.get(coreCell).add(entry.getKey());
+                        }
                     }
                 }
-            }
 
+            } catch (IOException | ClassNotFoundException e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
         }
 
 
@@ -1201,7 +1206,6 @@ public class Methods implements Serializable {
                 coreCell.buildKdTree(dim);
 
             //---Write Result----
-/*
             FileSystem fs = null;
             BufferedOutputStream bw = null;
             String output = "";
@@ -1209,7 +1213,6 @@ public class Methods implements Serializable {
                 fs = FileSystem.get(conf);
                 bw = new BufferedOutputStream(fs.create(new Path(pairOutputPath + "/bordercell_" + borderCell.cellId)));
             }
-*/
             //-------------------
 
 
@@ -1221,14 +1224,12 @@ public class Methods implements Serializable {
                             emits.add(new Tuple2<Integer, ApproximatedPoint>(coreCell.clusterId, pt));
 
                             //wirte border points
-/*
                             if (pairOutputPath != null) {
                                 for (Long id : pt.ptsIds) {
                                     output = id + delimeter + coreCell.clusterId + "\n";
                                     bw.write(output.getBytes());
                                 }
                             }
-*/
 
                             //overlap
                             break;
@@ -1236,10 +1237,8 @@ public class Methods implements Serializable {
                     }
                 }
 
-/*
                 if (pairOutputPath != null)
                     bw.close();
-*/
 
             }
             return emits.iterator();
@@ -1255,13 +1254,11 @@ public class Methods implements Serializable {
         public Configuration conf = null;
         public String pairOutputPath = null;
 
-        public AssignCorePointToCluster(Configuration conf, String pairOutputPath, String metaResult, String delimeter, List<Cluster> clusters) {
+        public AssignCorePointToCluster(Configuration conf, String pairOutputPath, String metaResult, String delimeter) {
             // TODO Auto-generated constructor stub
             this.conf = conf;
             this.pairOutputPath = pairOutputPath;
             this.delimeter = delimeter;
-            this.clusters = clusters;
-/*
             FileSystem fs = null;
             try {
                 fs = FileSystem.get(this.conf);
@@ -1278,7 +1275,6 @@ public class Methods implements Serializable {
                 // TODO Auto-generated catch block
                 e.printStackTrace();
             }
-*/
         }
 
         @Override
@@ -1293,7 +1289,7 @@ public class Methods implements Serializable {
                 cells.add(grids.next());
 
             //---Write Result----
-    /*        FileSystem fs = null;
+            FileSystem fs = null;
             BufferedOutputStream bw = null;
             String output = "";
 
@@ -1302,7 +1298,7 @@ public class Methods implements Serializable {
                 bw = new BufferedOutputStream(fs.create(new Path(pairOutputPath + "/corecells" + cells.get(0)._2.cellId + "~")));
             }
 
-*/            //-------------------
+            //-------------------
 
             for (Tuple2<Integer, ApproximatedCell> cell : cells) {
 
@@ -1322,22 +1318,18 @@ public class Methods implements Serializable {
                         emits.add(new Tuple2<Integer, ApproximatedPoint>(clusterId, pt));
 
                         //write core points
-/*
                         if (pairOutputPath != null) {
                             for (Long id : pt.ptsIds) {
                                 output = id + delimeter + clusterId + "\n";
                                 bw.write(output.getBytes());
                             }
                         }
-*/
                     }
                 }
             }
 
-/*
             if (pairOutputPath != null)
                 bw.close();
-*/
 
             return emits.iterator();
         }

@@ -7,6 +7,8 @@ module purge
 module load openjdk/21.0.2
 
 DATASET=$1; DIM=$2; EPS=$3; MINPTS=$4; NUM_PARTITIONS=$5; EXP_DIR=$6; OUT=$7; RHO=$8
+SCRATCH_DIR=${SCRATCH_DIR:-/scratch/$USER/scratch-$JOBID}
+mkdir -p "$SCRATCH_DIR"
 
 GLOBAL_RANK=${SLURM_PROCID:-0}
 NUM_TASKS=${SLURM_NTASKS:-1}
@@ -112,7 +114,7 @@ if [ "$GLOBAL_RANK" -eq 0 ]; then
     --conf spark.executor.extraJavaOptions="-XX:+UseG1GC" \
     --conf spark.driver.extraJavaOptions="-XX:+UseG1GC" \
     /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
-    -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR"
+    -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR" -S "$SCRATCH_DIR"
   SUBMIT_RC=$?
 fi
 

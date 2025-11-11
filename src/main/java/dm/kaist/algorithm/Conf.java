@@ -36,6 +36,7 @@ public final class Conf implements Serializable {
     public String convertTableFolder = "CONVERTS";
     public String coreInfoFolder = "CORE_INFO";
     public String metaResult = "GLOBAL_CELL_GRAPH";
+    public String edgePath = "EDGES";
     public int limitDimForVirtualCombining = 6;
     public int numOflvhCellsInMetaPartition = 12000000;
     public int limitNumOflv1Cell = 1000000;
@@ -59,6 +60,7 @@ public final class Conf implements Serializable {
             System.out.println(" -minPts : the minimum number of neighbor points.");
             System.out.println(" -eps : the radius of a neighborhood.");
             System.out.println(" -M : Metrics output path (local file system).");
+            System.out.println(" -S : Scratch directory path (HDFS).");
             System.out.println("2. Optional parameters");
             System.out.println(" -bs : the block size for virtually combining two-level cell dictionary (default : 1).");
             System.out.println(" -l : the hdfs path to write labeled points, <point id, cluster label> (default : no output).");
@@ -97,7 +99,13 @@ public final class Conf implements Serializable {
                 epsilon = Float.parseFloat(value);
             else if (header.equals("-M"))
                 metricsPath = value;
-            else if (header.equals("-bs"))
+            else if (header.equals("-S")) {
+                metaFoler = value + "/DICTIONARY";
+                convertTableFolder = value + "/CONVERTS";
+                coreInfoFolder = value + "/CORE_INFO";
+                metaResult = value + "/GLOBAL_CELL_GRAPH";
+                edgePath = value + "/EDGES";
+            } else if (header.equals("-bs"))
                 metaBlockWindow = Integer.parseInt(value);
                 //We are now testing this code to boost our algorithm.
             else if (header.equals("-boost")) {
