@@ -103,6 +103,7 @@ if [ "$GLOBAL_RANK" -eq 0 ]; then
     --class dm.kaist.main.MainDriver \
     --conf spark.executor.memoryOverhead=4096 \
     --conf spark.driver.memory=$DRIVER_MEMORY \
+    --conf spark.executor.memory=$SPARK_EXECUTOR_MEMORY \
     --conf spark.driver.maxResultSize=8g \
     /home/siepef/code/RP-DBSCAN/target/rp-dbscan-1.0-SNAPSHOT.jar \
     -i "$DATASET" -o "$OUT" -rho "$RHO" -dim "$DIM" -eps "$EPS" -minPts "$MINPTS" -np "$NUM_PARTITIONS" -M "$EXP_DIR" -S "$SCRATCH_DIR"
