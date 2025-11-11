@@ -35,7 +35,7 @@ for i in "${!datasets[@]}"; do
     dim="${dims[$i]}"
     read -r -a eps_array <<< "$eps_string"
     for eps in "${eps_array[@]}"; do
-      ./run.sh "/home/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" /home/siepef/experiments/eps
+      ./run.sh "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" /home/siepef/experiments/eps
       exit_code=$?
       if [ $exit_code -ne 0 ]; then
         ((failed_count++))
