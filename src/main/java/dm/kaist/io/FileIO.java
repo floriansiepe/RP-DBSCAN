@@ -66,12 +66,46 @@ public class FileIO {
         long size = 0;
 
         for (int i = 0; i < status.length; i++) {
-            String path = status[i].getPath().toString();
+            // Skip directories, temporary and hidden files (e.g. _SUCCESS) and zero-length files
+            if (status[i].isDirectory()) {
+                continue;
+            }
             String fileName = status[i].getPath().getName();
+            if (fileName == null) continue;
+            if (fileName.startsWith("_") || fileName.startsWith(".")) {
+                // skip Hadoop marker files and hidden files
+                System.out.println("Skipping broadcast of file: " + fileName);
+                continue;
+            }
+            long len = status[i].getLen();
+            if (len == 0) {
+                System.out.println("Skipping zero-length file: " + fileName);
+                continue;
+            }
+
+            // Verify file is gzip-compressed by checking magic bytes before broadcasting
+            boolean looksLikeGzip = false;
+            try (org.apache.hadoop.fs.FSDataInputStream in = fs.open(status[i].getPath())) {
+                int b1 = in.read();
+                int b2 = in.read();
+                if (b1 == 0x1f && b2 == 0x8b) {
+                    looksLikeGzip = true;
+                }
+            } catch (IOException e) {
+                System.out.println("Failed to read header of file " + fileName + ": " + e.getMessage());
+                continue;
+            }
+
+            if (!looksLikeGzip) {
+                System.out.println("Skipping non-gzip file: " + fileName);
+                continue;
+            }
+
+            String path = status[i].getPath().toString();
             sc.addFile(path);
             metaPaths.add(fileName);
 
-            size += status[i].getLen();
+            size += len;
         }
 
         System.out.println("size : " + size);
