@@ -98,6 +98,7 @@ $SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PO
 SUBMIT_RC=0
 if [ "$GLOBAL_RANK" -eq 0 ]; then
   echo "[SUBMIT] spark-submit (executorMemory=$SPARK_EXECUTOR_MEMORY executorCores=$SPARK_EXECUTOR_CORES parallelism=$SPARK_DEFAULT_PARALLELISM instances=${SPARK_EXECUTOR_INSTANCES:-1})"
+  echo "[SUBMIT] Dataset=$DATASET Dim=$DIM Eps=$EPS MinPts=$MINPTS NumPartitions=$NUM_PARTITIONS ExpDir=$EXP_DIR Out=$OUT Rho=$RHO ScratchDir=$SCRATCH_DIR"
   $SPARK_HOME/bin/spark-submit \
     --master "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" \
     --deploy-mode client \
