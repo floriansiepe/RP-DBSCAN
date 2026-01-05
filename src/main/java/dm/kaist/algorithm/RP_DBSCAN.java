@@ -76,7 +76,8 @@ public class RP_DBSCAN implements Serializable {
          */
 
         //Read input data set from HDFS
-        JavaRDD<String> lines = sc.textFile(cfg.inputPath, cfg.numOfPartitions);
+        // Force sequential reading
+        JavaRDD<String> lines = sc.textFile(cfg.inputPath, cfg.numOfPartitions).coalesce(1);
         JavaPairRDD<List<Integer>, ApproximatedCell> dataMap = null;
 
         //Data partitioning
