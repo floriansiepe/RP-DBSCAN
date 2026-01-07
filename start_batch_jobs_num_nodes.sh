@@ -10,7 +10,7 @@ if [ ! -f "./run.slurm" ]; then
 fi
 
 # Number of nodes to iterate over (adjust as needed for your cluster)
-node_counts=(1 2 4 8 16)
+node_counts=(1 2 4 6 8 10)
 
 # Fixed number of partitions
 num_partitions=128
