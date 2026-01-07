@@ -36,7 +36,7 @@ fi
 # Launch one task per node (task layout already allocated). Use --label for clearer logs.
 # Forward positional args.
 set -e
-bash run_inner.sh "$DATASET" "$DIM" "$EPS" "$MINPTS" "$NUM_PARTITIONS" "$EXP_DIR" "$OUT" "$RHO"
+srun bash run_inner.sh "$DATASET" "$DIM" "$EPS" "$MINPTS" "$NUM_PARTITIONS" "$EXP_DIR" "$OUT" "$RHO"
 rc=$?
 set +e
 echo "[ORCH] srun completed rc=$rc"
