@@ -37,7 +37,7 @@ for iter in "${iter_count[@]}"; do
     mkdir -p "$exp_dir"
 
 
-    sbatch run.sh "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir"
+    sbatch run.slurm "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir"
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
       echo "-> FAILED: $dataset (exit $exit_code)"
