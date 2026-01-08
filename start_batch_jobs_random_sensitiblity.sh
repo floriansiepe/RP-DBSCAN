@@ -37,7 +37,7 @@ for iter in "${iter_count[@]}"; do
     mkdir -p "$exp_dir"
 
 
-    sbatch run.sh "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir"
+    ./run.sh "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir"
     sleep 0.2
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
