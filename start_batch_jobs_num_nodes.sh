@@ -45,7 +45,7 @@ for num_nodes in "${node_counts[@]}"; do
 
     echo "Running dataset=$dataset dim=$dim eps=$eps minPts=$min_pts nodes=$num_nodes"
 
-    sbatch --nodes="$num_nodes" --ntasks-per-node=1 --time=05:00:00 run.slurm "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir" "out.csv" "0.01"
+    sbatch --nodes="$num_nodes" --ntasks="$num_nodes" --ntasks-per-node=1 --time=05:00:00 run.slurm "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir" "out.csv" "0.01"
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
       echo "-> FAILED: $dataset nodes=$num_nodes (exit $exit_code)"
