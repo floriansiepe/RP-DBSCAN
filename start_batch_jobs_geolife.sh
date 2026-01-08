@@ -13,7 +13,7 @@ fi
 iter_count=(1 2 3 4 5)
 
 # Fixed number of partitions
-num_partitions=64
+num_partitions=128
 
 # Create a grid of batch jobs
 datasets=("densired_2.csv" "densired_3.csv" "densired_4.csv" "densired_5.csv" "activity.csv" "geolife_gps_data.csv" "twitter_processed.csv" "tng_50.csv")

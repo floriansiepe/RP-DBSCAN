@@ -13,7 +13,7 @@ fi
 iter_count=(1 2 3 4 5)
 
 # Fixed number of partitions
-num_partitions=64
+num_partitions=128
 
 # Create a grid of batch jobs
 datasets=("densired_2.csv" "densired_3.csv" "densired_4.csv" "densired_5.csv" "activity.csv" "geolife_gps_data.csv" "twitter_processed.csv" "tng_50.csv")
@@ -38,6 +38,7 @@ for iter in "${iter_count[@]}"; do
 
 
     sbatch run.sh "/scratch_shared/siepef/datasets/$dataset" "$dim" "$eps" "$min_pts" "$num_partitions" "$exp_dir"
+    sleep 0.2
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
       echo "-> FAILED: $dataset (exit $exit_code)"

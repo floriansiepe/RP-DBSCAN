@@ -23,7 +23,7 @@ eps_values=(0.15 0.15 0.15 0.15 0.15 70 0.15 6)
 
 # Default values for other parameters
 MIN_CELL_FACTOR=3
-NUM_PARTITIONER=64
+NUM_PARTITIONER=128
 DBSCAN_IMPL="grid"
 SAMPLER="random"
 
