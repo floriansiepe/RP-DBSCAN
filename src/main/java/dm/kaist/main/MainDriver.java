@@ -10,6 +10,7 @@ import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.Point;
 import metrics.MetricWriter;
 import metrics.entity.ClusterParameters;
+import metrics.entity.CommunicationCosts;
 import metrics.entity.DatasetParameters;
 import metrics.entity.Measurement;
 import org.apache.commons.lang3.ObjectUtils;
@@ -87,9 +88,13 @@ public class MainDriver {
 
         //Write meta results
         rp_dbscan.writeMetaResult(durationMs);
+        var communicationCosts = rp_dbscan.getCommunicationCosts();
 
         var writer = new MetricWriter(Path.of(conf.metricsPath));
         var datasetName = conf.inputPath.substring(conf.inputPath.lastIndexOf('/') + 1, conf.inputPath.lastIndexOf('.'));
+        var commCost = new HashMap<String, Object>();
+        commCost.put("exchangedPartitioningPoints", communicationCosts.partitioningPointsExchanged());
+        commCost.put("exchangedMergingEdges", communicationCosts.mergingEdgesExchanged());
         var measurement = new Measurement<>(
                 "RP-DBSCAN",
                 durationMs,
@@ -99,7 +104,8 @@ public class MainDriver {
                 ),
                 new DatasetParameters(
                         datasetName
-                )
+                ),
+                commCost
         );
         writer.writeMetrics(measurement);
 

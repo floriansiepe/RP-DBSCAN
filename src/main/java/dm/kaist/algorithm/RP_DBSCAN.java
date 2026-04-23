@@ -6,11 +6,13 @@ import dm.kaist.io.ApproximatedPoint;
 import dm.kaist.io.FileIO;
 import dm.kaist.io.SerializableConfiguration;
 import dm.kaist.partition.Partition;
+import metrics.entity.CommunicationCosts;
 import org.apache.commons.lang3.ObjectUtils.Null;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.storage.StorageLevel;
+import org.apache.spark.util.LongAccumulator;
 import scala.Tuple2;
 
 import java.io.BufferedWriter;
@@ -38,10 +40,17 @@ public class RP_DBSCAN implements Serializable {
     public long numOfClusters = 0;
     public List<Tuple2<Integer, Long>> numOfPtsInCluster = null;
 
+    public LongAccumulator commCostPointsAcc;
+    public LongAccumulator commCostEdgesAcc;
+
     public RP_DBSCAN(JavaSparkContext sc, Conf config) {
         this.sc = sc;
         this.conf = new SerializableConfiguration();
         this.config = config;
+
+        // Initialize accumulators in the driver
+        this.commCostPointsAcc = sc.sc().longAccumulator("CommCostPointsExchanged");
+        this.commCostEdgesAcc = sc.sc().longAccumulator("CommCostEdgesExchanged");
 
         this.initialization(conf, config);
     }
@@ -84,27 +93,33 @@ public class RP_DBSCAN implements Serializable {
         if (cfg.boost) {
             dataMap = lines.zipWithIndex()
                     .mapToPair(tuple -> new Methods.PointToCell(cfg.dim, cfg.epsilon, tuple._2, cfg.delimeter).call(tuple._1))
-                    .combineByKey(k -> new Methods.CreateLocalApproximatedPoint(cfg.dim, cfg.epsilon, cfg.rho).call(k), (v, p) -> new Methods.LocalApproximation(cfg.dim, cfg.epsilon, cfg.rho).call(v, p), (l, r) -> new Methods.GlobalApproximation(cfg.dim, cfg.limitNumOflv1Cell).call(l, r))
+                    .combineByKey(k -> new Methods.CreateLocalApproximatedPoint(cfg.dim, cfg.epsilon, cfg.rho).call(k),
+                            (v, p) -> new Methods.LocalApproximation(cfg.dim, cfg.epsilon, cfg.rho).call(v, p),
+                            (l, r) -> new Methods.GlobalApproximation(cfg.dim, cfg.limitNumOflv1Cell).call(l, r))
                     .mapToPair(new Methods.PseudoRandomPartition2(cfg.metaBlockWindow, cfg.limitDimForVirtualCombining));
-        } else
+        } else {
             dataMap = lines.zipWithIndex()
                     .mapToPair(tuple -> new Methods.PointToCell(cfg.dim, cfg.epsilon, tuple._2, cfg.delimeter).call(tuple._1))
                     .groupByKey()
                     .mapToPair(tuple -> new Methods.PseudoRandomPartition(cfg.dim, cfg.epsilon, cfg.rho, cfg.metaBlockWindow, cfg.pairOutputPath, cfg.limitDimForVirtualCombining).call(tuple));
+        }
+
         numOfCells = dataMap.count();
 
         /**
          * Phase I-2. Cell_Dictionary_Building & Broadcasting
          */
         //Dictionary Defragmentation
-        JavaPairRDD<List<Integer>, Long> ptsCountforEachMetaBlock = dataMap.mapToPair(k -> new Methods.MetaBlockMergeWithApproximation(cfg.dim).call(k)).reduceByKey((x, y) -> new Methods.AggregateCount().call(x, y));
+        JavaPairRDD<List<Integer>, Long> ptsCountforEachMetaBlock = dataMap
+                .mapToPair(k -> new Methods.MetaBlockMergeWithApproximation(cfg.dim).call(k))
+                .reduceByKey((x, y) -> new Methods.AggregateCount().call(x, y));
+
         List<Tuple2<List<Integer>, Long>> numOfPtsInCell = ptsCountforEachMetaBlock.collect();
         for (Tuple2<List<Integer>, Long> entry : numOfPtsInCell) {
             if (entry._1.size() != cfg.dim) {
                 throw new RuntimeException("Wrong number of blocks for virtually combining");
             }
         }
-
 
         HashMap<List<Integer>, List<Integer>> partitionIndex = new HashMap<List<Integer>, List<Integer>>();
         Tuple2<Long, List<Partition>> metaInfoForVirtualCombining = Methods.scalablePartition(numOfPtsInCell, cfg.dim, cfg.numOflvhCellsInMetaPartition / cfg.dim, partitionIndex, cfg.limitDimForVirtualCombining);
@@ -118,9 +133,16 @@ public class RP_DBSCAN implements Serializable {
         metaDataSet.collect();
 
         //Re-partition the pseudo random partitions into Each Worker by a randomly assigned integer value for reducing the size of memory usage.
-        dataset = dataMap.mapToPair(new Methods.Repartition(cfg.numOfPartitions)).repartition(cfg.numOfPartitions).persist(StorageLevel.MEMORY_AND_DISK_SER());
+        Methods.Repartition repartitionFunc = new Methods.Repartition(cfg.numOfPartitions);
 
-        //Broadcast two-level cell dictionary to every workers.
+        dataset = dataMap.mapToPair(tuple -> {
+                    // Count logical points right before they are sent to the shuffle
+                    commCostPointsAcc.add((long) tuple._2.getApproximatedPtsCount());
+                    return repartitionFunc.call(tuple);
+                })
+                .repartition(cfg.numOfPartitions)
+                .persist(StorageLevel.MEMORY_AND_DISK_SER());
+
         try {
             metaPaths = FileIO.broadCastData(sc, conf, config.metaFoler);
         } catch (IOException e) {
@@ -158,7 +180,6 @@ public class RP_DBSCAN implements Serializable {
          */
         // Build cell subgraph
         edgeSet = coreCells.mapPartitionsToPair(new Methods.FindDirectDensityReachableEdgesWithApproximation(config.dim, config.epsilon, config.minPts, conf, metaPaths, corePaths, config.numOfPartitions)).repartition(config.numOfPartitions / 2);
-
     }
 
     /**
@@ -178,7 +199,13 @@ public class RP_DBSCAN implements Serializable {
         int curPartitionSize = cfg.numOfPartitions;
         while (curPartitionSize != 1) {
             curPartitionSize = curPartitionSize / 2;
-            edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePaths, curPartitionSize, config.edgePath)).repartition(curPartitionSize);
+            edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePaths, curPartitionSize, config.edgePath))
+                    .mapToPair(tuple -> {
+                        // Increment accumulator for every edge participating in the merge shuffle
+                        commCostEdgesAcc.add(1L);
+                        return tuple;
+                    })
+                    .repartition(curPartitionSize);
         }
 
         List<Tuple2<Integer, Integer>> result = edgeSet.mapPartitionsToPair(new Methods.FinalPhase(sconf, corePaths, config.metaResult)).collect();
@@ -238,6 +265,16 @@ public class RP_DBSCAN implements Serializable {
 		*/
 
         assignedResult.unpersist();
+    }
+
+    /**
+     * Get communication costs for this execution
+     */
+    public CommunicationCosts getCommunicationCosts() {
+        return new CommunicationCosts(
+                commCostPointsAcc.value(),
+                commCostEdgesAcc.value()
+        );
     }
 
     /**
