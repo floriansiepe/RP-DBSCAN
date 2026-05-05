@@ -19,8 +19,9 @@ module load openjdk/21.0.2
 # Capture arguments to forward to inner script
 DATASET=$1; DIM=$2; EPS=$3; MINPTS=$4; NUM_PARTITIONS=$5; EXP_DIR=$6; OUT=$7; RHO=$8
 
-# Set spark env
-SPARK_EXECUTOR_MEMORY=100g
+# Set spark env (export so srun-launched tasks inherit these values)
+export SPARK_EXECUTOR_MEMORY=${SPARK_EXECUTOR_MEMORY:-100g}
+export SPARK_EXECUTOR_INSTANCES=${SPARK_EXECUTOR_INSTANCES:-$SLURM_NTASKS}
 
 # Basic validation
 if [ -z "$RHO" ]; then
@@ -28,6 +29,7 @@ if [ -z "$RHO" ]; then
 
 # Show allocation summary
 echo "[ORCH] JobID=$SLURM_JOB_ID Nodes=$SLURM_JOB_NODELIST NNodes=$SLURM_NNODES NTasks=$SLURM_NTASKS Cores/Task=$SLURM_CPUS_PER_TASK"
+echo "[ORCH] Spark defaults: executorMemory=$SPARK_EXECUTOR_MEMORY executorInstances=$SPARK_EXECUTOR_INSTANCES"
 
 # Ensure inner script exists (defensive)
 if [ ! -f "run_inner.sh" ]; then

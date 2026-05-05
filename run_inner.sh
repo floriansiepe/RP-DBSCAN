@@ -42,6 +42,8 @@ else
 fi
 SPARK_EXECUTOR_MEMORY=${SPARK_EXECUTOR_MEMORY:-$DEFAULT_EXECUTOR_MEMORY}
 SPARK_EXECUTOR_CORES=${SPARK_EXECUTOR_CORES:-$SPARK_WORKER_CORES}
+# Default to one executor per allocated Slurm task/worker unless explicitly overridden.
+SPARK_EXECUTOR_INSTANCES=${SPARK_EXECUTOR_INSTANCES:-$NUM_TASKS}
 DRIVER_MEMORY=${DRIVER_MEMORY:-8g}
 
 # Optional splitting
@@ -97,12 +99,16 @@ $SPARK_HOME/sbin/start-worker.sh "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PO
 
 SUBMIT_RC=0
 if [ "$GLOBAL_RANK" -eq 0 ]; then
-  echo "[SUBMIT] spark-submit (executorMemory=$SPARK_EXECUTOR_MEMORY executorCores=$SPARK_EXECUTOR_CORES parallelism=$SPARK_DEFAULT_PARALLELISM instances=${SPARK_EXECUTOR_INSTANCES:-1})"
+  echo "[SUBMIT] spark-submit (executorMemory=$SPARK_EXECUTOR_MEMORY executorCores=$SPARK_EXECUTOR_CORES parallelism=$SPARK_DEFAULT_PARALLELISM instances=$SPARK_EXECUTOR_INSTANCES)"
   echo "[SUBMIT] Dataset=$DATASET Dim=$DIM Eps=$EPS MinPts=$MINPTS NumPartitions=$NUM_PARTITIONS ExpDir=$EXP_DIR Out=$OUT Rho=$RHO ScratchDir=$SCRATCH_DIR"
   $SPARK_HOME/bin/spark-submit \
     --master "spark://$MASTER_NODE_HOSTNAME:$SPARK_MASTER_PORT" \
     --deploy-mode client \
     --class dm.kaist.main.MainDriver \
+    --conf spark.dynamicAllocation.enabled=false \
+    --conf spark.executor.instances=$SPARK_EXECUTOR_INSTANCES \
+    --conf spark.executor.cores=$SPARK_EXECUTOR_CORES \
+    --conf spark.default.parallelism=$SPARK_DEFAULT_PARALLELISM \
     --conf spark.executor.memoryOverhead=2048 \
     --conf spark.driver.memory=$DRIVER_MEMORY \
     --conf spark.executor.memory=$SPARK_EXECUTOR_MEMORY \
