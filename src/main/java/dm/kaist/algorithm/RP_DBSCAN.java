@@ -122,6 +122,13 @@ public class RP_DBSCAN implements Serializable {
             }
         }
 
+        // Track partitioning communication cost on the driver (sum of exchanged approximated points).
+        long partitioningPointsExchanged = 0L;
+        for (Tuple2<List<Integer>, Long> entry : numOfPtsInCell) {
+            partitioningPointsExchanged += entry._2;
+        }
+        commCostPointsAcc.add(partitioningPointsExchanged);
+
         HashMap<List<Integer>, List<Integer>> partitionIndex = new HashMap<List<Integer>, List<Integer>>();
         Tuple2<Long, List<Partition>> metaInfoForVirtualCombining = Methods.scalablePartition(numOfPtsInCell, cfg.dim, cfg.numOflvhCellsInMetaPartition / cfg.dim, partitionIndex, cfg.limitDimForVirtualCombining);
         numOfSubCells = metaInfoForVirtualCombining._1;
@@ -134,13 +141,7 @@ public class RP_DBSCAN implements Serializable {
         metaDataSet.collect();
 
         //Re-partition the pseudo random partitions into Each Worker by a randomly assigned integer value for reducing the size of memory usage.
-        Methods.Repartition repartitionFunc = new Methods.Repartition(cfg.numOfPartitions);
-
-        dataset = dataMap.mapToPair(tuple -> {
-                    // Count logical points right before they are sent to the shuffle
-                    pointsAcc.add((long) tuple._2.getApproximatedPtsCount());
-                    return repartitionFunc.call(tuple);
-                })
+        dataset = dataMap.mapToPair(new Methods.Repartition(cfg.numOfPartitions))
                 .repartition(cfg.numOfPartitions)
                 .persist(StorageLevel.MEMORY_AND_DISK_SER());
 
@@ -202,12 +203,10 @@ public class RP_DBSCAN implements Serializable {
         while (curPartitionSize != 1) {
             curPartitionSize = curPartitionSize / 2;
             edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePaths, curPartitionSize, config.edgePath))
-                    .mapToPair(tuple -> {
-                        // Increment accumulator for every edge participating in the merge shuffle
-                        edgesAcc.add(1L);
-                        return tuple;
-                    })
                     .repartition(curPartitionSize);
+
+            // Count exchanged edges for this merge round on the driver.
+            commCostEdgesAcc.add(edgeSet.count());
         }
 
         List<Tuple2<Integer, Integer>> result = edgeSet.mapPartitionsToPair(new Methods.FinalPhase(sconf, corePaths, config.metaResult)).collect();
