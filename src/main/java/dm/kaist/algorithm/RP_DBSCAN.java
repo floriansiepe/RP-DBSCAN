@@ -79,6 +79,7 @@ public class RP_DBSCAN implements Serializable {
         // Create local final copies of instance fields used inside lambdas to avoid capturing 'this'
         final Conf cfg = this.config;
         final SerializableConfiguration sconf = this.conf;
+        final LongAccumulator pointsAcc = this.commCostPointsAcc;
 
         /**
          * Phase I-1. Pseudo Random Partitioning
@@ -137,7 +138,7 @@ public class RP_DBSCAN implements Serializable {
 
         dataset = dataMap.mapToPair(tuple -> {
                     // Count logical points right before they are sent to the shuffle
-                    commCostPointsAcc.add((long) tuple._2.getApproximatedPtsCount());
+                    pointsAcc.add((long) tuple._2.getApproximatedPtsCount());
                     return repartitionFunc.call(tuple);
                 })
                 .repartition(cfg.numOfPartitions)
@@ -190,6 +191,7 @@ public class RP_DBSCAN implements Serializable {
         // Create local final copies of instance fields used inside lambdas to avoid capturing 'this'
         final Conf cfg = this.config;
         final SerializableConfiguration sconf = this.conf;
+        final LongAccumulator edgesAcc = this.commCostEdgesAcc;
 
         /**
          * Phase III-1: Progressive Graph Merging
@@ -202,7 +204,7 @@ public class RP_DBSCAN implements Serializable {
             edgeSet = edgeSet.mapPartitionsToPair(new Methods.BuildMST(sconf, corePaths, curPartitionSize, config.edgePath))
                     .mapToPair(tuple -> {
                         // Increment accumulator for every edge participating in the merge shuffle
-                        commCostEdgesAcc.add(1L);
+                        edgesAcc.add(1L);
                         return tuple;
                     })
                     .repartition(curPartitionSize);
